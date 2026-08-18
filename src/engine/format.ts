@@ -5,24 +5,79 @@
  * handed, so the UI and the engine can both call them freely.
  */
 
-import type { Ctx, GameState } from '@/types';
+import type { Ctx, GameState, Person } from '@/types';
+
+/** Groups an unsigned integer with commas without depending on host locale data. */
+function group(abs: number): string {
+  return String(abs).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/** Rounds to one decimal place; `String` then drops a trailing `.0` for free. */
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
 
 /** Formats a whole-currency amount, e.g. `$12,340` and `-$500` for negatives. */
 export function fmtMoney(n: number): string {
-  throw new Error('TODO:format.fmtMoney');
+  const whole = Math.round(Number.isFinite(n) ? n : 0);
+  const sign = whole < 0 ? '-' : '';
+  return `${sign}$${group(Math.abs(whole))}`;
 }
 
 /** Formats money with a magnitude suffix for tight spaces, e.g. `$1.2M`. */
 export function fmtMoneyCompact(n: number): string {
-  throw new Error('TODO:format.fmtMoneyCompact');
+  const whole = Math.round(Number.isFinite(n) ? n : 0);
+  const sign = whole < 0 ? '-' : '';
+  const abs = Math.abs(whole);
+  if (abs < 1e4) return fmtMoney(whole);
+  // Each tier promotes when its own rounding carries into the next one, so
+  // 999,999 reads "$1M" rather than "$1000K".
+  const thousands = Math.round(abs / 1e3);
+  if (thousands < 1000) return `${sign}$${thousands}K`;
+  const millions = round1(abs / 1e6);
+  if (millions < 1000) return `${sign}$${millions}M`;
+  return `${sign}$${round1(abs / 1e9)}B`;
+}
+
+/** Name of the current spouse, else the current partner, else undefined. */
+function currentPartner(state: GameState): Person | undefined {
+  const people = Object.values(state.people);
+  return (
+    people.find((p) => p.alive && p.kind === 'spouse') ??
+    people.find((p) => p.alive && p.kind === 'partner')
+  );
 }
 
 /** Substitutes `{name} {firstName} {lastName} {he} {him} {his} {partner} {country} {age}`. */
 export function fillTemplate(text: string, state: GameState): string {
-  throw new Error('TODO:format.fillTemplate');
+  if (text.indexOf('{') === -1) return text;
+  const c = state.character;
+  const partner = currentPartner(state);
+  const values: Record<string, string> = {
+    name: `${c.firstName} ${c.lastName}`.trim(),
+    firstName: c.firstName,
+    lastName: c.lastName,
+    he: c.pronouns.sub,
+    him: c.pronouns.obj,
+    his: c.pronouns.pos,
+    partner: partner ? partner.name : 'your partner',
+    // createLife stores the human-readable country label; the id is the fallback.
+    country: String(c.flags.countryLabel ?? c.countryId),
+    age: String(c.age),
+  };
+  return text.replace(/\{(\w+)\}/g, (whole: string, key: string): string => {
+    const direct = values[key];
+    if (direct !== undefined) return direct;
+    // `{He}` / `{Partner}` at the start of a sentence resolve to a capitalised value.
+    const lower = key.charAt(0).toLowerCase() + key.slice(1);
+    const alt = values[lower];
+    if (alt === undefined) return whole; // unknown tokens stay visible instead of vanishing
+    return alt.charAt(0).toUpperCase() + alt.slice(1);
+  });
 }
 
 /** Resolves content text that may be a literal or a builder, then fills its templates. */
 export function resolveText(text: string | ((ctx: Ctx) => string), ctx: Ctx): string {
-  throw new Error('TODO:format.resolveText');
+  const raw = typeof text === 'function' ? text(ctx) : text;
+  return fillTemplate(raw, ctx.state);
 }
