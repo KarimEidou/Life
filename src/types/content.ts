@@ -26,6 +26,11 @@ export interface Ctx {
   c: Character;
   rng: Rng;
   reg: ContentRegistry;
+  /**
+   * The Person a player-initiated interaction is aimed at; set by the engine
+   * when an interaction is run with a targetId (e.g. gift, insult, propose).
+   */
+  target?: Person;
 }
 
 /**
