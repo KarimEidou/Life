@@ -48,12 +48,27 @@ function aliveChildren(state: GameState): Person[] {
   return Object.values(state.people).filter((p) => p.alive && p.kind === 'child');
 }
 
+/**
+ * Age from which a life with no work behind it is read as unemployment. Below
+ * it there was no career to miss, so the obituary keeps quiet about work.
+ */
+const WORKING_AGE = 18;
+
+/** True once a job has been held, even if no title survived to be remembered. */
+function hasWorked(c: Character): boolean {
+  const held = Number(c.flags.jobsHeld ?? 0);
+  return Number.isFinite(held) && held > 0;
+}
+
 /** Last known occupation for the obituary; empty when there is nothing to say. */
 function occupationOf(c: Character): string {
   if (c.job) return c.job.title;
   const last = c.flags.lastJobTitle;
   if (typeof last === 'string' && last.length > 0) return last;
-  return c.age < 6 ? '' : 'Unemployed';
+  // Nobody has worked past this point: schooling is what the life was about.
+  if (c.education.enrolledIn) return 'Student';
+  if (c.age < WORKING_AGE && !hasWorked(c)) return '';
+  return 'Unemployed';
 }
 
 /** Ends the life: records cause, age, obituary and epitaph stats, then sets phase `dead`. */

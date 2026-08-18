@@ -48,6 +48,31 @@ const BIRTH_NOUN: Record<Gender, string> = {
   nonbinary: 'child',
 };
 
+/**
+ * Refusal handed to a player action once the life has ended.
+ *
+ * Mirrors the wording `interactions.canUse` already refuses with, so the whole
+ * engine says the same thing about a finished life.
+ */
+export const LIFE_OVER = 'Your life is over.';
+
+/**
+ * True once the life has ended.
+ *
+ * A finished life is read-only: no player action may touch it or its epitaph
+ * stats, so every exported player action gates on this before it mutates state,
+ * spends a draw or writes to the log. `state.death.epitaphStats` is settled at
+ * the moment of death and would otherwise disagree with a character sheet a
+ * later action had kept editing.
+ *
+ * Phases are deliberately not gated: `ageUp` already refuses any phase but
+ * `alive`, and the phase chain must still finish the year it is inside when a
+ * death lands mid-year.
+ */
+export function lifeIsOver(state: GameState): boolean {
+  return state.phase === 'dead';
+}
+
 /** Cost of one visa application, charged whether or not it is approved. */
 const VISA_FEE = 2000;
 
@@ -242,6 +267,13 @@ export function emigrateTo(
   countryId: string
 ): { ok: boolean; reason?: string; text?: string } {
   const c = state.character;
+  /* Refused before the fee, the cooldown stamp and the visa roll: emigrating
+     from a corpse would charge $2,000 against a settled estate and advance the
+     shared cursor past the end of the life. Reported with this function's own
+     machine-readable vocabulary rather than the prose the other actions use. */
+  if (lifeIsOver(state)) {
+    return { ok: false, reason: 'life-over' };
+  }
   const dest = findCountry(reg, countryId);
   if (!dest) {
     return { ok: false, reason: 'unknown-country' };

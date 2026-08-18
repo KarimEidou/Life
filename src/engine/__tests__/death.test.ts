@@ -187,12 +187,60 @@ describe('killCharacter', () => {
     expect(jobless.death?.obituary).toContain('at 45. Unemployed. Left');
   });
 
-  it('leaves the occupation clause out for a small child', () => {
-    const state = life(emptyRegistry(), 3, 2003);
-    killCharacter(state, emptyRegistry(), 'a sudden illness');
-    expect(state.death?.obituary).toBe(
-      'Ada Byron, 2000-2003. Died of a sudden illness at 3. Left $0 and 0 children.'
-    );
+  /* A schoolchild or a teenager has no career to fail at, so the obituary of a
+     minor who never worked says nothing about work at all. */
+  it('leaves the occupation clause out for a minor who never worked', () => {
+    for (const age of [0, 3, 5, 6, 9, 14, 17]) {
+      const state = life(emptyRegistry(), age, 2000 + age);
+      killCharacter(state, emptyRegistry(), 'a sudden illness');
+      expect(state.death?.obituary).toBe(
+        `Ada Byron, 2000-${2000 + age}. Died of a sudden illness at ${age}. ` +
+          'Left $0 and 0 children.'
+      );
+    }
+  });
+
+  it('calls a jobless adult unemployed from 18 on', () => {
+    const adult = life(emptyRegistry(), 18, 2018);
+    killCharacter(adult, emptyRegistry(), 'a sudden illness');
+    expect(adult.death?.obituary).toContain('at 18. Unemployed. Left');
+  });
+
+  it('remembers someone still in school as a student', () => {
+    const pupil = life(emptyRegistry(), 12, 2012);
+    pupil.character.education.enrolledIn = 'middle';
+    killCharacter(pupil, emptyRegistry(), 'a fever');
+    expect(pupil.death?.obituary).toContain('at 12. Student. Left');
+
+    const undergrad = life(emptyRegistry(), 20, 2020);
+    undergrad.character.education.enrolledIn = 'university';
+    killCharacter(undergrad, emptyRegistry(), 'a fever');
+    expect(undergrad.death?.obituary).toContain('at 20. Student. Left');
+  });
+
+  it('remembers a working minor by the job rather than by their age', () => {
+    const employed = life(emptyRegistry(), 17, 2017);
+    employed.character.job = {
+      jobId: 'barista',
+      title: 'Barista',
+      salary: 12000,
+      years: 1,
+      performance: 50,
+      workHard: false,
+    };
+    killCharacter(employed, emptyRegistry(), 'a car crash');
+    expect(employed.death?.obituary).toContain('at 17. Barista. Left');
+
+    const fired = life(emptyRegistry(), 17, 2017);
+    fired.character.flags.lastJobTitle = 'Paper Boy';
+    killCharacter(fired, emptyRegistry(), 'a car crash');
+    expect(fired.death?.obituary).toContain('at 17. Paper Boy. Left');
+
+    // Held a job, lost it without a remembered title: unemployed, not a child.
+    const jobless = life(emptyRegistry(), 17, 2017);
+    jobless.character.flags.jobsHeld = 1;
+    killCharacter(jobless, emptyRegistry(), 'a car crash');
+    expect(jobless.death?.obituary).toContain('at 17. Unemployed. Left');
   });
 
   it('derives jobs held from the current job when the flag is unset', () => {
@@ -530,11 +578,32 @@ describe('deathProbability', () => {
       })
     );
 
-    expect(curve[0]).toBeCloseTo(0.0002, 6);
+    expect(curve[0]).toBeCloseTo(0.002, 6);
     expect(curve[1]).toBeGreaterThan(curve[0]);
     expect(curve[2]).toBeGreaterThan(curve[1]);
     expect(curve[3]).toBeGreaterThan(curve[2]);
-    expect(curve[3]).toBeLessThan(0.1);
+    // Steep at 100, but still short of the 0.95 ceiling.
+    expect(curve[3]).toBeLessThan(0.95);
+  });
+
+  /* The scale of the curve decides whether anyone ever dies of age at all. At
+     BASE_HAZARD 0.0002 an average 80-year-old died with ~0.7% odds a year — an
+     order of magnitude under the life tables — and the cohort piled up against
+     the 110 cap instead. These bands are life-table shaped (~5-7% a year at 80)
+     and fail for any base hazard off by a factor of ten either way. */
+  it('sits on a life-table scale', () => {
+    const reg = emptyRegistry();
+    const at = (age: number): number =>
+      hazard(reg, (s) => {
+        s.character.age = age;
+      });
+
+    expect(at(30)).toBeLessThan(0.01);
+    expect(at(60)).toBeGreaterThan(0.005);
+    expect(at(60)).toBeLessThan(0.03);
+    expect(at(80)).toBeGreaterThan(0.04);
+    expect(at(80)).toBeLessThan(0.1);
+    expect(at(100)).toBeGreaterThan(0.25);
   });
 
   it('is flat below 40', () => {

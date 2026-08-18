@@ -171,6 +171,37 @@ describe('saveGame / loadGame', () => {
     storage.setItem('ol.save.1', JSON.stringify(env));
     expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'future' });
   });
+
+  it('reports a newer save as future even when its state shape differs', () => {
+    /* A newer build is exactly where `GameState` may have been reshaped, so the
+       version gate has to win over the shape check — `corrupt` would invite the
+       player to delete a perfectly good save instead of updating the game. */
+    const storage = memoryStorage();
+    const newer = SAVE_VERSION + 98;
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: newer, savedAt: 1, slot: 1, state: { hero: {} } })
+    );
+    storage.setItem('ol.save.2', JSON.stringify({ version: newer, savedAt: 1, slot: 2, state: 7 }));
+    storage.setItem('ol.save.3', JSON.stringify({ version: newer, savedAt: 1, slot: 3 }));
+    expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'future' });
+    expect(loadGame(storage, 2)).toEqual({ ok: false, reason: 'future' });
+    expect(loadGame(storage, 3)).toEqual({ ok: false, reason: 'future' });
+  });
+
+  it('still reports a same-or-older save with a bad shape as corrupt', () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION, savedAt: 1, slot: 1, state: { hero: {} } })
+    );
+    storage.setItem(
+      'ol.save.2',
+      JSON.stringify({ version: SAVE_VERSION - 1, savedAt: 1, slot: 2, state: { hero: {} } })
+    );
+    expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'corrupt' });
+    expect(loadGame(storage, 2)).toEqual({ ok: false, reason: 'corrupt' });
+  });
 });
 
 describe('migrations', () => {

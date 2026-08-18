@@ -27,6 +27,9 @@ const DEFAULT_MAX_AGE = 200;
 /** Shown on any action the character was not allowed to take. */
 const BLOCKED_ICON = '🚫';
 
+/** Refusal handed to every player action once the life has ended. */
+const LIFE_OVER = 'Your life is over.';
+
 /** Second and later convictions carry half again the rolled sentence. */
 const REPEAT_OFFENDER_MULT = 1.5;
 
@@ -60,10 +63,16 @@ function settleDeath(state: GameState, reg: ContentRegistry): void {
   killCharacter(state, reg, cause);
 }
 
-/** Checks the age window, condition, cooldown and whether the cost is affordable. */
+/**
+ * Checks that the life is still running, then the age window, condition,
+ * cooldown and whether the cost is affordable.
+ */
 export function canUse(ctx: Ctx, def: InteractionDef): { ok: boolean; reason?: string } {
   const c = ctx.state.character;
   const age = c.age;
+
+  // A finished life is read-only: no action may touch it or its epitaph stats.
+  if (ctx.state.phase === 'dead') return { ok: false, reason: LIFE_OVER };
 
   if (age < (def.minAge ?? 0)) return { ok: false, reason: "You're too young." };
   if (age > (def.maxAge ?? DEFAULT_MAX_AGE)) return { ok: false, reason: "You're too old." };
@@ -83,7 +92,13 @@ export function canUse(ctx: Ctx, def: InteractionDef): { ok: boolean; reason?: s
   return { ok: true };
 }
 
-/** All interactions in `area` that currently pass `canUse`. */
+/**
+ * Interactions in `area` that are age-appropriate and pass their `condition`.
+ *
+ * Rows that fail only on cost or cooldown are deliberately kept so the sheet can
+ * render them greyed out with the reason from `canUse` — call `canUse` per row
+ * before enabling it, since this list is wider than what `runInteraction` allows.
+ */
 export function availableInteractions(
   state: GameState,
   reg: ContentRegistry,
@@ -157,7 +172,12 @@ export function commitCrime(
   const c = state.character;
   const def = findCrime(reg, crimeId);
   if (!def) return { text: 'You thought better of it.', icon: BLOCKED_ICON, entries: [] };
+  if (state.phase === 'dead') return { text: LIFE_OVER, icon: BLOCKED_ICON, entries: [] };
   if (c.prison) return { text: "You're already in prison.", icon: BLOCKED_ICON, entries: [] };
+  // Guard before the roll, like `canUse`: a refused crime must not spend a draw.
+  if (c.age < def.minAge) {
+    return { text: "You're too young for that.", icon: BLOCKED_ICON, entries: [] };
+  }
 
   const rng = createRng(state);
   const ctx: Ctx = { state, c, rng, reg };

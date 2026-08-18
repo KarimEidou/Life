@@ -643,41 +643,312 @@ describe('resolveChoice', () => {
     );
   });
 
-  it('refuses an empty queue, an unknown event and a missing index', () => {
+  it('refuses an empty queue and an out-of-range index', () => {
     const reg = eventRegistry(forkEvent());
 
     const empty = atFork(36);
     empty.pending = [];
     expect(() => resolveChoice(empty, reg, 0)).toThrow('empty pending queue');
 
-    const unknown = atFork(37);
-    unknown.pending[0].eventId = 'ghost';
-    expect(() => resolveChoice(unknown, reg, 0)).toThrow('unknown event ghost');
-
     const outOfRange = atFork(38);
     expect(() => resolveChoice(outOfRange, reg, 3)).toThrow('no choice at index 3');
-
-    const stale = atFork(39, ['Vanished label']);
-    expect(() => resolveChoice(stale, reg, 0)).toThrow('no choice labelled Vanished label');
+    // A caller mistake leaves the card up, so the call can be retried.
+    expect(outOfRange.phase).toBe('awaitingChoice');
+    expect(outOfRange.pending).toHaveLength(1);
   });
 
-  it('refuses an event that has no choices to make', () => {
+  it('reports a bad index even when the event is missing from the registry', () => {
+    /* The content-drift path below must not swallow a caller bug: an index the
+       card never offered is wrong whatever the registry says. */
+    const stale = atFork(39);
+    stale.pending[0].eventId = 'ghost';
+
+    expect(() => resolveChoice(stale, emptyRegistry(), 3)).toThrow('no choice at index 3');
+    expect(stale.pending).toHaveLength(1);
+    expect(stale.phase).toBe('awaitingChoice');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   resolveChoice against content that has moved on.
+
+   A card is written into the save by event id and label, but it is answered
+   against whatever content the running build ships. Every one of these misses
+   used to throw, and since `ageUp` refuses any phase but `alive`, a save parked
+   on `awaitingChoice` was then locked out of both calls for good.
+--------------------------------------------------------------------------- */
+
+describe('resolveChoice on a card the current content cannot resolve', () => {
+  const LOST_LINE = 'The moment passed before you could decide.';
+
+  it('discards a pending event the registry no longer defines instead of locking the life', () => {
+    // Registry B is the pack that queued the card, with the event dropped.
+    const state = atFork(50);
+    const regB = emptyRegistry();
+    const ageBefore = state.character.age;
+    const cursorBefore = state.rngState;
+
+    resolveChoice(state, regB, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+    // A neutral line stands in for the outcome that can no longer be rolled.
+    expect(lastYear(state).entries.slice(-1)).toEqual([
+      { icon: '🍴', kind: 'info', text: LOST_LINE },
+    ]);
+    // No outcome, so no effects and — the determinism budget — no draw.
+    expect(state.character.stats.happiness).toBe(50);
+    expect(state.rngState).toBe(cursorBefore);
+
+    // The point of the fix: the life is playable again.
+    ageUp(state, regB);
+    expect(state.character.age).toBe(ageBefore + 1);
+  });
+
+  it('discards a card whose event no longer branches', () => {
+    // The same id, rewritten by a content update into an instant event.
     const instant: EventDef = {
-      id: 'gust',
+      id: 'fork',
       area: 'life',
-      icon: '🌬️',
+      icon: '🍴',
       minAge: 0,
       maxAge: 120,
       weight: 1,
-      text: 'A gust of wind.',
-      effects: [],
+      text: 'A fork in the road.',
+      effects: [{ kind: 'stat', stat: 'happiness', delta: 30 }],
     };
-    const state = atFork(40);
-    state.pending[0].eventId = 'gust';
+    const state = atFork(51);
 
-    expect(() => resolveChoice(state, eventRegistry(instant), 0)).toThrow(
-      'event gust has no choices'
-    );
+    resolveChoice(state, eventRegistry(instant), 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+    // The instant rewrite's effects are not a stand-in outcome.
+    expect(state.character.stats.happiness).toBe(50);
+    expect(texts(lastYear(state).entries).slice(-1)).toEqual([LOST_LINE]);
+  });
+
+  it('discards a card whose chosen label the event has retired', () => {
+    const state = atFork(52, ['Vanished label']);
+
+    resolveChoice(state, eventRegistry(forkEvent()), 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+    expect(state.character.stats.happiness).toBe(50);
+    expect(texts(lastYear(state).entries).slice(-1)).toEqual([LOST_LINE]);
+  });
+
+  it('discards a card whose chosen option has no outcome it can roll', () => {
+    /* The label survives the update but every outcome behind it is weightless,
+       so `rng.weighted` has nothing to land on. Throwing here was terminal:
+       `ageUp` takes no phase but `alive` and the retry threw the same way, so
+       the save had no legal move left. */
+    const def = forkEvent();
+    def.choices = [{ label: 'Only', outcomes: [{ weight: 0, text: 'nope', effects: [] }] }];
+    const reg = eventRegistry(def);
+    const state = atFork(55, ['Only']);
+    const ageBefore = state.character.age;
+    const cursorBefore = state.rngState;
+
+    resolveChoice(state, reg, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+    expect(lastYear(state).entries.slice(-1)).toEqual([
+      { icon: '🍴', kind: 'info', text: LOST_LINE },
+    ]);
+    // The unrollable outcome is not silently promoted to the winner.
+    expect(texts(lastYear(state).entries)).not.toContain('nope');
+    // The draw-free property the other discard paths guarantee holds here too.
+    expect(state.rngState).toBe(cursorBefore);
+    expect(state.character.stats.happiness).toBe(50);
+
+    // The point of the fix: the life advances again, against the same pack.
+    ageUp(state, reg);
+    expect(state.character.age).toBe(ageBefore + 1);
+  });
+
+  it('discards a card whose chosen option lost its outcome list entirely', () => {
+    const def = forkEvent();
+    def.choices = [{ label: 'Go right', outcomes: [] }];
+    const state = atFork(56);
+    const cursorBefore = state.rngState;
+
+    resolveChoice(state, eventRegistry(def), 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+    expect(texts(lastYear(state).entries).slice(-1)).toEqual([LOST_LINE]);
+    expect(state.rngState).toBe(cursorBefore);
+    expect(state.character.stats.happiness).toBe(50);
+  });
+
+  it('discards on every weight set rng.weighted refuses, and only those', () => {
+    // Mirrors `rng.weighted`: only a finite, strictly positive weight is rollable.
+    const unrollable = [[0, 0], [-1, -2], [Number.NaN], [Number.POSITIVE_INFINITY], [0, -3]];
+    for (const weights of unrollable) {
+      const def = forkEvent();
+      def.choices = [
+        {
+          label: 'Go right',
+          outcomes: weights.map((weight, i) => ({ weight, text: `w${i}`, effects: [] })),
+        },
+      ];
+      const state = atFork(57);
+      const cursorBefore = state.rngState;
+
+      resolveChoice(state, eventRegistry(def), 0);
+
+      expect(texts(lastYear(state).entries).slice(-1)).toEqual([LOST_LINE]);
+      expect(state.phase).toBe('alive');
+      expect(state.pending).toEqual([]);
+      expect(state.rngState).toBe(cursorBefore);
+    }
+
+    // One positive weight among the junk is still a real roll, not a discard.
+    const def = forkEvent();
+    def.choices = [
+      {
+        label: 'Go right',
+        outcomes: [
+          { weight: 0, text: 'w0', effects: [] },
+          { weight: 2, text: 'w1', effects: [] },
+        ],
+      },
+    ];
+    const rolled = atFork(57);
+    const cursorBefore = rolled.rngState;
+
+    resolveChoice(rolled, eventRegistry(def), 0);
+
+    expect(texts(lastYear(rolled).entries).slice(-1)).toEqual(['w1']);
+    expect(rolled.rngState).not.toBe(cursorBefore);
+  });
+
+  it('discards only the option that cannot be rolled, not its rollable siblings', () => {
+    const def = forkEvent();
+    def.choices = [
+      { label: 'Dead end', outcomes: [{ weight: 0, text: 'nope', effects: [] }] },
+      {
+        label: 'Go right',
+        outcomes: [
+          {
+            weight: 1,
+            text: 'You went right, {name}.',
+            effects: [{ kind: 'stat', stat: 'happiness', delta: 5 }],
+          },
+        ],
+      },
+    ];
+    const reg = eventRegistry(def);
+
+    const stuck = atFork(58, ['Dead end', 'Go right']);
+    resolveChoice(stuck, reg, 0);
+    expect(texts(lastYear(stuck).entries).slice(-1)).toEqual([LOST_LINE]);
+    expect(stuck.character.stats.happiness).toBe(50);
+
+    const fine = atFork(58, ['Dead end', 'Go right']);
+    resolveChoice(fine, reg, 1);
+    expect(texts(lastYear(fine).entries).slice(-1)).toEqual(['You went right, Ada Byron.']);
+    expect(fine.character.stats.happiness).toBe(55);
+    expect(fine.phase).toBe('alive');
+  });
+
+  it('replays an unrollable-outcome discard identically from the same seed', () => {
+    const def = forkEvent();
+    def.choices = [{ label: 'Only', outcomes: [{ weight: 0, text: 'nope', effects: [] }] }];
+    const reg = eventRegistry(def);
+
+    const play = (): GameState => {
+      const state = atFork(59, ['Only']);
+      resolveChoice(state, reg, 0);
+      ageUp(state, emptyRegistry());
+      return state;
+    };
+
+    expect(JSON.stringify(play())).toBe(JSON.stringify(play()));
+  });
+
+  it('drops one card per call and drains a queue of them', () => {
+    const state = atFork(53);
+    state.pending.push({
+      eventId: 'fork',
+      text: 'Another fork.',
+      icon: '🍴',
+      choices: [{ label: 'Go right' }],
+    });
+    const regB = emptyRegistry();
+
+    resolveChoice(state, regB, 0);
+
+    expect(state.phase).toBe('awaitingChoice');
+    expect(state.pending).toHaveLength(1);
+
+    resolveChoice(state, regB, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+  });
+
+  it('leaves a still-valid card behind it answerable as normal', () => {
+    const state = atFork(54);
+    state.pending[0].eventId = 'ghost';
+    state.pending.push({
+      eventId: 'fork',
+      text: 'A fork in the road.',
+      icon: '🍴',
+      choices: [{ label: 'Go right' }],
+    });
+    const reg = eventRegistry(forkEvent());
+
+    resolveChoice(state, reg, 0);
+    expect(state.phase).toBe('awaitingChoice');
+    expect(state.character.stats.happiness).toBe(50);
+
+    resolveChoice(state, reg, 0);
+    expect(state.phase).toBe('alive');
+    expect(state.character.stats.happiness).toBe(55);
+  });
+
+  it('recovers a life the real chain parked on an event a content update removed', () => {
+    // Registry A ships the event; the next build renames or drops it.
+    const regA = eventRegistry(forkEvent());
+    const regB = emptyRegistry();
+
+    const state = createLife(regA, { seed: 2, startYear: 2000 });
+    for (let guard = 0; guard < 50 && state.phase === 'alive'; guard += 1) {
+      ageUp(state, regA);
+    }
+    expect(state.phase).toBe('awaitingChoice');
+    expect(state.pending).toHaveLength(1);
+
+    // Answering against the new content must not dead-end the save.
+    resolveChoice(state, regB, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+
+    const ageBefore = state.character.age;
+    ageUp(state, regB);
+    expect(state.character.age).toBe(ageBefore + 1);
+  });
+
+  it('replays a discard identically from the same seed', () => {
+    const regA = eventRegistry(forkEvent());
+    const regB = emptyRegistry();
+
+    const play = (): GameState => {
+      const state = createLife(regA, { seed: 2, startYear: 2000 });
+      for (let guard = 0; guard < 50 && state.phase === 'alive'; guard += 1) {
+        ageUp(state, regA);
+      }
+      resolveChoice(state, regB, 0);
+      ageUp(state, regB);
+      return state;
+    };
+
+    expect(JSON.stringify(play())).toBe(JSON.stringify(play()));
   });
 });
 

@@ -5,6 +5,7 @@ import type {
   ContentRegistry,
   Ctx,
   GameState,
+  LogEntry,
   SchoolDef,
   YearLog,
 } from '@/types';
@@ -21,6 +22,7 @@ vi.mock('@/engine/ageUp', () => ({
   },
 }));
 
+import { killCharacter } from '@/engine/death';
 import { applyToSchool, dropOut, educationPhase, setStudyHard } from '@/engine/phases/education';
 import { createRng, initialRngState } from '@/engine/rng';
 
@@ -62,10 +64,22 @@ const MED: SchoolDef = {
   tuitionPerYear: 25000,
   majors: ['biology'],
 };
+/** A second university, so a registry can retire `uni` and still teach degrees. */
+const CITY_UNI: SchoolDef = {
+  id: 'city',
+  label: 'City University',
+  level: 'university',
+  years: 3,
+  tuitionPerYear: 8000,
+  majors: ['cs', 'biology'],
+  minGpa: 2,
+};
+
+const ALL_SCHOOLS: readonly SchoolDef[] = [PRIMARY, MIDDLE, HIGH, UNI, MED];
 
 // Hand-rolled fixtures: `buildRegistry` and `createLife` belong to other modules.
-function makeRegistry(): ContentRegistry {
-  const schools = [PRIMARY, MIDDLE, HIGH, UNI, MED];
+function makeRegistry(schoolList: readonly SchoolDef[] = ALL_SCHOOLS): ContentRegistry {
+  const schools = [...schoolList];
   const schoolsById: Record<string, SchoolDef> = {};
   for (const school of schools) schoolsById[school.id] = school;
   return {
@@ -374,6 +388,41 @@ describe('applyToSchool', () => {
     ]);
   });
 
+  it('turns away an applicant for a level they already hold', () => {
+    const reg = makeRegistry();
+
+    const bachelor = makeState({
+      age: 25,
+      money: 200000,
+      education: { level: 'university', major: 'cs', year: 0, gpa: 3, studyHard: false },
+    });
+    /* Sitting the same level again cannot advance anyone, so the applicant is
+       turned away rather than charged four more years of tuition for nothing. */
+    expect(applyToSchool(bachelor, reg, 'uni', 'cs')).toEqual({
+      ok: false,
+      reason: 'You already have a degree.',
+    });
+    expect(bachelor.character.education.enrolledIn).toBeUndefined();
+    expect(lastEntries(bachelor)).toEqual([]);
+
+    const doctor = makeState({
+      age: 30,
+      money: 200000,
+      education: { level: 'postgrad', major: 'biology', year: 0, gpa: 3.5, studyHard: false },
+    });
+    // A postgrad already outranks a bachelor's, so that is refused as well.
+    expect(applyToSchool(doctor, reg, 'uni', 'cs')).toEqual({
+      ok: false,
+      reason: 'You already have a degree.',
+    });
+    expect(applyToSchool(doctor, reg, 'med')).toEqual({
+      ok: false,
+      reason: 'You already have a postgraduate degree.',
+    });
+    expect(doctor.character.education.enrolledIn).toBeUndefined();
+    expect(doctor.character.money).toBe(200000);
+  });
+
   it('gates postgrad on a degree with an accepted undergrad major', () => {
     const reg = makeRegistry();
 
@@ -432,15 +481,94 @@ describe('degree years', () => {
 
     const first = educationPhase(makeCtx(state, reg));
     expect(state.character.loans).toEqual([
-      { id: 'l1-19', kind: 'student', principal: 15000, apr: 0.05 },
+      { id: 'l1', kind: 'student', principal: 15000, apr: 0.05 },
     ]);
     expect(first).toEqual([{ icon: '🏦', kind: 'money', text: 'You took a student loan.' }]);
 
     state.character.age = 20;
     const second = educationPhase(makeCtx(state, reg));
-    expect(state.character.loans).toHaveLength(2);
-    expect(state.character.loans[1]?.id).toBe('l2-20');
+    /* The second year tops the same debt up rather than minting a second one:
+       one record per school year has the finance phase clear four debts in the
+       same year and print the same payoff line four times over. */
+    expect(state.character.loans).toEqual([
+      { id: 'l1', kind: 'student', principal: 30000, apr: 0.05 },
+    ]);
     expect(second).toEqual([]);
+  });
+
+  it('finances a whole degree as one accumulating debt', () => {
+    const state = student({ money: 0, age: 19 });
+    const reg = makeRegistry();
+
+    for (let year = 0; year < 4; year += 1) {
+      educationPhase(makeCtx(state, reg));
+      state.character.age += 1;
+    }
+
+    expect(state.character.education.level).toBe('university');
+    expect(state.character.loans).toEqual([
+      { id: 'l1', kind: 'student', principal: 60000, apr: 0.05 },
+    ]);
+    // Four years of tuition, one id spent.
+    expect(state.character.flags.nextLoanId).toBe(2);
+  });
+
+  it('adds the next degree to the debt the last one left', () => {
+    const state = makeState({
+      age: 24,
+      money: 0,
+      education: { level: 'university', major: 'biology', year: 0, gpa: 3.6, studyHard: false },
+      loans: [{ id: 'l1', kind: 'student', principal: 60000, apr: 0.05 }],
+      flags: { nextLoanId: 2 },
+    });
+    const reg = makeRegistry();
+
+    expect(applyToSchool(state, reg, 'med')).toEqual({ ok: true });
+    educationPhase(makeCtx(state, reg));
+
+    // Still one student debt to owe, to repay and to announce the payoff of.
+    expect(state.character.loans).toEqual([
+      { id: 'l1', kind: 'student', principal: 85000, apr: 0.05 },
+    ]);
+  });
+
+  it('mints a fresh debt once the last one was paid off', () => {
+    const state = makeState({
+      age: 24,
+      money: 0,
+      education: { level: 'university', major: 'biology', year: 0, gpa: 3.6, studyHard: false },
+      loans: [{ id: 'l4', kind: 'personal', principal: 2000, apr: 0.09 }],
+      flags: { nextLoanId: 5 },
+    });
+    const reg = makeRegistry();
+
+    expect(applyToSchool(state, reg, 'med')).toEqual({ ok: true });
+    educationPhase(makeCtx(state, reg));
+
+    // Nothing to top up, and a personal loan is not a student debt to fold into.
+    expect(state.character.loans).toEqual([
+      { id: 'l4', kind: 'personal', principal: 2000, apr: 0.09 },
+      { id: 'l5', kind: 'student', principal: 25000, apr: 0.05 },
+    ]);
+  });
+
+  it('mints the loan id from the shared counter, never from the loan count', () => {
+    /* Two loans were taken earlier this life and the first has since been paid
+       off, so the count no longer says anything about which ids are live. */
+    const state = student({
+      money: 0,
+      age: 19,
+      loans: [{ id: 'l2', kind: 'personal', principal: 5000, apr: 0.09 }],
+      flags: { nextLoanId: 3 },
+    });
+
+    educationPhase(makeCtx(state, makeRegistry()));
+
+    expect(state.character.loans).toEqual([
+      { id: 'l2', kind: 'personal', principal: 5000, apr: 0.09 },
+      { id: 'l3', kind: 'student', principal: 15000, apr: 0.05 },
+    ]);
+    expect(state.character.flags.nextLoanId).toBe(4);
   });
 
   it('graduates after the programme length and keeps the major', () => {
@@ -488,6 +616,36 @@ describe('degree years', () => {
     ]);
   });
 
+  it('keeps the higher degree when a lower programme finishes', () => {
+    /* A save from before postgrad enrolment was gated, or content that moved a
+       school down a level: whatever put the desk here, `EdLevel` is the highest
+       level *completed*, so finishing this one must not revoke the one held. */
+    const state = makeState({
+      age: 26,
+      money: 200000,
+      education: {
+        level: 'postgrad',
+        enrolledIn: 'uni',
+        major: 'cs',
+        year: 3,
+        gpa: 3.5,
+        studyHard: false,
+      },
+      flags: { postgradId: 'med' },
+    });
+
+    const entries = educationPhase(makeCtx(state, makeRegistry()));
+
+    const ed = state.character.education;
+    expect(ed.level).toBe('postgrad');
+    // The bachelor's really did finish, so the desk is empty either way.
+    expect(ed.enrolledIn).toBeUndefined();
+    expect(ed.year).toBe(0);
+    expect(entries).toEqual([
+      { icon: '🎓', kind: 'good', text: 'You earned your State University degree.' },
+    ]);
+  });
+
   it('lets a fresh loan notice fire for the next degree', () => {
     const state = makeState({
       age: 22,
@@ -508,6 +666,109 @@ describe('degree years', () => {
     const entries = educationPhase(makeCtx(state, reg));
 
     expect(entries).toEqual([{ icon: '🏦', kind: 'money', text: 'You took a student loan.' }]);
+  });
+});
+
+describe('educationPhase content drift', () => {
+  /* A save outlives the content it was written against: an update that retires a
+     school leaves an id nothing resolves. The desk must empty, or the character
+     is "in school" for the rest of the life with no way out but `dropOut`. */
+
+  it('empties the desk when the degree it sits in was retired, and opens applications again', () => {
+    // The update pulled `uni`; `city` is the university that survived it.
+    const drifted = makeRegistry([PRIMARY, MIDDLE, HIGH, CITY_UNI, MED]);
+    const state = makeState({
+      age: 20,
+      money: 100000,
+      education: {
+        level: 'high',
+        enrolledIn: 'uni',
+        major: 'cs',
+        year: 2,
+        gpa: 3.2,
+        studyHard: true,
+      },
+    });
+    const cursor = state.rngState;
+
+    const entries = educationPhase(makeCtx(state, drifted));
+
+    const ed = state.character.education;
+    expect(ed.enrolledIn).toBeUndefined();
+    expect(ed.year).toBe(0);
+    // Nothing was earned or revoked by the school going missing.
+    expect(ed.level).toBe('high');
+    expect(ed.major).toBe('cs');
+    expect(ed.gpa).toBe(3.2);
+    expect(state.character.money).toBe(100000);
+    expect(state.character.loans).toEqual([]);
+    expect(entries).toEqual([]);
+    // No school, so no grades and no study drift either.
+    expect(state.character.stats).toEqual({ health: 80, happiness: 60, smarts: 50, looks: 50 });
+    // Mirrors `discardPending`: dropping the desk spends no draw.
+    expect(state.rngState).toBe(cursor);
+
+    // The gate that answered 'You are already in school.' forever is open again.
+    expect(applyToSchool(state, drifted, 'city', 'cs')).toEqual({ ok: true });
+    expect(state.character.education.enrolledIn).toBe('city');
+  });
+
+  it('puts a schoolchild back on the compulsory ladder when their school was retired', () => {
+    const drifted = makeRegistry([MIDDLE, HIGH, UNI, MED]); // primary school retired
+    const state = makeState({
+      age: 8,
+      education: { level: 'none', enrolledIn: 'ps', year: 2, gpa: 2.8, studyHard: false },
+    });
+
+    const entries: LogEntry[] = [];
+    for (let age = 9; age <= 18; age += 1) {
+      state.character.age = age;
+      entries.push(...educationPhase(makeCtx(state, drifted)));
+    }
+
+    const ed = state.character.education;
+    expect(ed.enrolledIn).toBeUndefined();
+    /* The retired school is never credited — primary was not proved — but the
+       ladder carries the character the rest of the way to a diploma. */
+    expect(ed.level).toBe('high');
+    expect(entries).toEqual([
+      { icon: '🏫', kind: 'info', text: 'You started middle school.' },
+      { icon: '🏫', kind: 'info', text: 'You started high school.' },
+      { icon: '🎓', kind: 'good', text: 'You graduated high school.' },
+    ]);
+  });
+
+  it('clears the desk on a quiet year without re-enrolling or spending a draw', () => {
+    const drifted = makeRegistry([MIDDLE, HIGH, UNI, MED]);
+    const state = makeState({
+      age: 9,
+      education: { level: 'none', enrolledIn: 'ps', year: 3, gpa: 2.8, studyHard: true },
+    });
+    const cursor = state.rngState;
+
+    const entries = educationPhase(makeCtx(state, drifted));
+
+    const ed = state.character.education;
+    expect(ed.enrolledIn).toBeUndefined();
+    expect(ed.year).toBe(0);
+    expect(ed.level).toBe('none');
+    expect(ed.gpa).toBe(2.8);
+    expect(entries).toEqual([]);
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('still refuses to re-enrol a dropout whose school was retired', () => {
+    const drifted = makeRegistry([MIDDLE, HIGH, UNI, MED]);
+    const state = makeState({
+      age: 11,
+      education: { level: 'none', enrolledIn: 'ps', year: 3, gpa: 2.4, studyHard: false },
+      flags: { droppedOut: true },
+    });
+
+    const entries = educationPhase(makeCtx(state, drifted));
+
+    expect(state.character.education.enrolledIn).toBeUndefined();
+    expect(entries).toEqual([]);
   });
 });
 
@@ -557,6 +818,38 @@ describe('dropOut and setStudyHard', () => {
 
     setStudyHard(state, false);
     expect(state.character.education.studyHard).toBe(false);
+  });
+});
+
+describe('schooling actions after death', () => {
+  it('refuses every one of them and leaves the life exactly as it was', () => {
+    const state = makeState({
+      age: 20,
+      money: 100000,
+      education: {
+        level: 'high',
+        enrolledIn: 'uni',
+        major: 'cs',
+        year: 1,
+        gpa: 3,
+        studyHard: false,
+      },
+    });
+    const reg = makeRegistry();
+
+    killCharacter(state, reg, 'a heart attack');
+    const character = JSON.stringify(state.character);
+    const cursor = state.rngState;
+    const feed = lastEntries(state).length;
+
+    expect(applyToSchool(state, reg, 'med')).toEqual({ ok: false, reason: 'Your life is over.' });
+    dropOut(state);
+    setStudyHard(state, true);
+
+    expect(JSON.stringify(state.character)).toBe(character);
+    // A refused action neither spends a draw nor writes a line after the obituary.
+    expect(state.rngState).toBe(cursor);
+    expect(lastEntries(state)).toHaveLength(feed);
   });
 });
 

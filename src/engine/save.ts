@@ -107,12 +107,15 @@ export function loadGame(storage: StorageAdapter, slot: number): LoadResult {
   if (!isRecord(parsed) || typeof parsed.version !== 'number') {
     return { ok: false, reason: 'corrupt' };
   }
+  /* Checked before the payload shape: a newer build is exactly the case where
+     `GameState` may have been reshaped, so shape-checking first would report the
+     newest saves as `corrupt` and invite the player to delete a good save. */
+  if (parsed.version > SAVE_VERSION) {
+    return { ok: false, reason: 'future' };
+  }
   const stored = parsed.state;
   if (!isRecord(stored) || !isRecord(stored.character)) {
     return { ok: false, reason: 'corrupt' };
-  }
-  if (parsed.version > SAVE_VERSION) {
-    return { ok: false, reason: 'future' };
   }
 
   /* Widened so a missing step reads as `undefined` instead of an always-defined

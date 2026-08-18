@@ -307,9 +307,18 @@ describe('applyEffects: jail', () => {
     ]);
     expect(state.character.prison).toEqual({ crime: 'Burglary', yearsLeft: 3, totalYears: 3 });
     expect(state.character.job).toBeNull();
+    // The obituary reads this flag; losing the job to a sentence must still set it.
+    expect(state.character.flags.lastJobTitle).toBe('Barista');
     expect(entries).toEqual([
       { icon: '⚖️', text: 'You were sentenced to 3 years in prison.', kind: 'legal' },
     ]);
+  });
+
+  it('leaves an earlier lastJobTitle alone when there is no job to lose', () => {
+    const state = makeState(makeCharacter({ job: null, flags: { lastJobTitle: 'Welder' } }));
+    applyEffects(makeCtx(state), [{ kind: 'jail', years: 2, crime: 'Fraud' }]);
+    expect(state.character.job).toBeNull();
+    expect(state.character.flags.lastJobTitle).toBe('Welder');
   });
 
   it('says "1 year" for a one-year sentence', () => {

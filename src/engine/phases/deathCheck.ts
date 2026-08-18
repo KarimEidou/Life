@@ -4,8 +4,14 @@
 
 import type { AddictionKey, Ctx, IllnessDef, LogEntry } from '@/types';
 
-/** Yearly hazard below 40, and the base the Gompertz curve starts from at 40. */
-const BASE_HAZARD = 0.0002;
+/**
+ * Yearly hazard below 40, and the base the Gompertz curve starts from at 40.
+ * Calibrated against real life tables: with AGE_EXPONENT this is ~6.8% a year
+ * at 80 and ~39% at 100, which lands an empty-content cohort near a 78-year
+ * average. A tenth of this and almost nobody dies of the curve at all — deaths
+ * come only from the 105/110 backstops below and the cohort averages ~99.
+ */
+const BASE_HAZARD = 0.002;
 
 /** Gompertz exponent: the hazard doubles roughly every eight years after 40. */
 const AGE_EXPONENT = 0.088;

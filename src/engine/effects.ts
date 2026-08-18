@@ -104,6 +104,9 @@ export function applyEffects(ctx: EffectCtx, effects: Effect[]): LogEntry[] {
       case 'jail': {
         const years = Math.max(0, Math.round(effect.years));
         c.prison = { crime: effect.crime, yearsLeft: years, totalYears: years };
+        /* The fifth job-ending path (career.ts owns the other four): remember the
+           title before the sentence clears it, or the obituary reads "Unemployed". */
+        if (c.job) c.flags.lastJobTitle = c.job.title;
         c.job = null;
         entries.push({
           icon: '⚖️',

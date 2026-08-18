@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { killCharacter } from '@/engine/death';
 import { availableInteractions, canUse, commitCrime, runInteraction } from '@/engine/interactions';
 import { buildRegistry } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
@@ -306,6 +307,30 @@ describe('commitCrime', () => {
     });
   });
 
+  it('refuses a crime below its minAge without spending a draw', () => {
+    const state = newLife(1, 8);
+    const reg = regOf({ crimes: [crime()] }); // minAge 10
+    const rngBefore = state.rngState;
+
+    expect(commitCrime(state, reg, 'shoplift')).toEqual({
+      text: "You're too young for that.",
+      icon: '🚫',
+      entries: [],
+    });
+    expect(state.character.money).toBe(1000);
+    expect(state.character.prison).toBeNull();
+    expect(state.character.flags.convictions).toBeUndefined();
+    expect(state.rngState).toBe(rngBefore);
+    expect(feed(state)).toEqual([]);
+  });
+
+  it('lets a character exactly at minAge through', () => {
+    const state = newLife(1, 10);
+    const reg = regOf({ crimes: [crime()] });
+
+    expect(commitCrime(state, reg, 'shoplift').text).toBe('You got away with Shoplifting. +$500');
+  });
+
   it('pays out and logs the score when the roll succeeds', () => {
     const state = newLife();
     const reg = regOf({ crimes: [crime()] });
@@ -340,9 +365,29 @@ describe('commitCrime', () => {
     });
     expect(state.character.prison).toEqual({ crime: 'Shoplifting', yearsLeft: 4, totalYears: 4 });
     expect(state.character.job).toBeNull();
+    expect(state.character.flags.lastJobTitle).toBe('Clerk');
     expect(state.character.stats.happiness).toBe(Math.max(0, happiness - 10));
     expect(state.character.flags.convictions).toBe(1);
     expect(feed(state)).toEqual(result.entries);
+  });
+
+  it('names the job the sentence cost in the obituary, not "Unemployed"', () => {
+    const state = newLife();
+    state.character.job = {
+      jobId: 'j1',
+      title: 'Junior Clerk',
+      salary: 30000,
+      years: 2,
+      performance: 60,
+      workHard: false,
+    };
+    const reg = regOf({ crimes: [crime({ successChance: () => 0 })] });
+
+    commitCrime(state, reg, 'shoplift');
+    killCharacter(state, reg, 'a shanking');
+
+    expect(state.death?.obituary).toContain('Junior Clerk.');
+    expect(state.death?.obituary).not.toContain('Unemployed');
   });
 
   it('adds half again to a repeat offender sentence', () => {
@@ -371,5 +416,50 @@ describe('commitCrime', () => {
     const texts = [...outcomes.values()];
     expect(texts.some((t) => t.startsWith('You got away'))).toBe(true);
     expect(texts.some((t) => t.startsWith('GUILTY.'))).toBe(true);
+  });
+});
+
+describe('a finished life', () => {
+  it('refuses every action once the character is dead', () => {
+    const state = newLife(8, 40);
+    const reg = regOf({
+      interactions: [
+        interaction({
+          resolve: () => ({ text: 'You worked out.', effects: [{ kind: 'stat', stat: 'health', delta: 5 }] }),
+        }),
+      ],
+      crimes: [crime({ id: 'rob', label: 'Robbery', payout: [1000, 1000] })],
+    });
+
+    killCharacter(state, reg, 'a meteor');
+    expect(state.phase).toBe('dead');
+
+    const money = state.character.money;
+    const health = state.character.stats.health;
+    const rngBefore = state.rngState;
+    const entriesBefore = feed(state).length;
+
+    expect(canUse(ctxOf(state, reg), interaction())).toEqual({
+      ok: false,
+      reason: 'Your life is over.',
+    });
+    expect(runInteraction(state, reg, 'gym')).toEqual({
+      text: 'Your life is over.',
+      icon: '🚫',
+      entries: [],
+    });
+    expect(commitCrime(state, reg, 'rob')).toEqual({
+      text: 'Your life is over.',
+      icon: '🚫',
+      entries: [],
+    });
+
+    expect(state.character.money).toBe(money);
+    expect(state.character.stats.health).toBe(health);
+    expect(state.character.prison).toBeNull();
+    expect(state.interactionUse).toEqual({});
+    expect(state.rngState).toBe(rngBefore);
+    // Nothing lands after the death line that closes the feed.
+    expect(feed(state)).toHaveLength(entriesBefore);
   });
 });

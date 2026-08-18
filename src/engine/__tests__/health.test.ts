@@ -31,10 +31,13 @@ function emptyRegistry(): ContentRegistry {
   };
 }
 
+/* Labels carry their own article, matching how `death.ts` reads one out:
+   "You died of the flu at age 50." Every sentence the health phase builds has to
+   swallow that same label unchanged. */
 function makeIllness(over: Partial<IllnessDef> = {}): IllnessDef {
   return {
     id: 'flu',
-    label: 'influenza',
+    label: 'the flu',
     chronic: false,
     lethality: 0,
     onsetWeight: () => 0,
@@ -110,9 +113,7 @@ describe('healthPhase onset', () => {
 
     expect(state.character.illnesses).toEqual([{ defId: 'flu', years: 0, treated: false }]);
     expect(state.character.stats.health).toBe(60);
-    expect(entries).toEqual([
-      { icon: '🤒', kind: 'health', text: 'You came down with influenza.' },
-    ]);
+    expect(entries).toEqual([{ icon: '🤒', kind: 'health', text: 'You came down with the flu.' }]);
   });
 
   it('never contracts an illness with zero onset, but still spends its roll', () => {
@@ -131,12 +132,17 @@ describe('healthPhase onset', () => {
   });
 
   it('does not roll onset for an illness already held', () => {
-    const reg = registryWith([makeIllness({ onsetWeight: () => 1 })]);
+    // cureChance 0 keeps it held, so the only draw left to see is the onset one.
+    const reg = registryWith([makeIllness({ onsetWeight: () => 1, cureChance: 0 })]);
     const state = makeState({ illnesses: [{ defId: 'flu', years: 2, treated: true }] });
 
     healthPhase(makeCtx(state, reg));
 
-    expect(state.character.illnesses).toHaveLength(1);
+    expect(state.character.illnesses).toEqual([{ defId: 'flu', years: 3, treated: true }]);
+    // A certain onset would fire a second time if it were rolled at all.
+    const mirror = { rngState: initialRngState(SEED) };
+    createRng(mirror).chance(0.5); // the recovery roll, and nothing else
+    expect(state.rngState).toBe(mirror.rngState);
   });
 
   it('does not also progress an illness in the year it appears', () => {
@@ -153,7 +159,8 @@ describe('healthPhase onset', () => {
 
 describe('healthPhase progression', () => {
   it('worsens an untreated illness every year and warns once when it turns serious', () => {
-    const reg = registryWith([makeIllness()]);
+    // cureChance 0 isolates progression from the yearly recovery roll.
+    const reg = registryWith([makeIllness({ cureChance: 0 })]);
     const state = makeState({
       stats: { health: 32, happiness: 60, smarts: 50, looks: 50 },
       illnesses: [{ defId: 'flu', years: 0, treated: false }],
@@ -163,7 +170,7 @@ describe('healthPhase progression', () => {
     expect(state.character.stats.health).toBe(22);
     expect(state.character.illnesses[0]?.years).toBe(1);
     expect(first).toEqual([
-      { icon: '🤕', kind: 'bad', text: 'Your influenza is getting serious.' },
+      { icon: '🤕', kind: 'bad', text: 'You are getting seriously ill with the flu.' },
     ]);
 
     const second = healthPhase(makeCtx(state, reg));
@@ -180,7 +187,78 @@ describe('healthPhase progression', () => {
 
     expect(state.character.illnesses).toEqual([]);
     expect(state.character.stats.health).toBe(80);
-    expect(entries).toEqual([{ icon: '💚', kind: 'good', text: 'You recovered from influenza.' }]);
+    expect(entries).toEqual([{ icon: '💚', kind: 'good', text: 'You recovered from the flu.' }]);
+  });
+
+  /* Nothing in the engine ever sets `treated`: no Effect kind flips it and no
+     phase writes it, so recovery that only fires for treated illnesses is
+     recovery that never fires at all. A cold has to pass on its own. */
+  it('cures an untreated illness on a successful roll, with no treatment anywhere', () => {
+    const reg = registryWith([makeIllness({ cureChance: 1 })]);
+    const state = makeState({ illnesses: [{ defId: 'flu', years: 1, treated: false }] });
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([]);
+    expect(entries).toEqual([{ icon: '💚', kind: 'good', text: 'You recovered from the flu.' }]);
+    // The year it resolves costs no further health: only the onset hit was ever paid.
+    expect(state.character.stats.health).toBe(80);
+  });
+
+  it('drops a resolving illness before it can warn about turning serious', () => {
+    const reg = registryWith([makeIllness({ cureChance: 1 })]);
+    const state = makeState({
+      stats: { health: 32, happiness: 60, smarts: 50, looks: 50 },
+      illnesses: [{ defId: 'flu', years: 4, treated: false }],
+    });
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.stats.health).toBe(32);
+    expect(entries).toEqual([{ icon: '💚', kind: 'good', text: 'You recovered from the flu.' }]);
+  });
+
+  it('treats an untreated illness as curable at its own rate, and treatment as better odds', () => {
+    // cureChance 0.5 doubles to a certainty when treated, so the split is exact.
+    const reg = registryWith([makeIllness({ cureChance: 0.5 })]);
+    const seeds = Array.from({ length: 40 }, (_, i) => i + 1);
+    const curesWhen = (treated: boolean): number => {
+      let cured = 0;
+      for (const seed of seeds) {
+        const state = makeState({ illnesses: [{ defId: 'flu', years: 1, treated }] }, seed);
+        healthPhase(makeCtx(state, reg));
+        if (state.character.illnesses.length === 0) cured += 1;
+      }
+      return cured;
+    };
+
+    expect(curesWhen(true)).toBe(seeds.length);
+    const untreated = curesWhen(false);
+    expect(untreated).toBeGreaterThan(0);
+    expect(untreated).toBeLessThan(seeds.length);
+  });
+
+  it('reads correctly in every sentence built from one article-bearing label', () => {
+    // One label, three sentences: none of them may frame it as a possessive.
+    const onsetState = makeState();
+    const worseningState = makeState({
+      stats: { health: 32, happiness: 60, smarts: 50, looks: 50 },
+      illnesses: [{ defId: 'flu', years: 0, treated: false }],
+    });
+    const cureState = makeState({ illnesses: [{ defId: 'flu', years: 1, treated: true }] });
+
+    const label = 'a bad back';
+    const texts = [
+      healthPhase(makeCtx(onsetState, registryWith([makeIllness({ label, onsetWeight: () => 1 })]))),
+      healthPhase(makeCtx(worseningState, registryWith([makeIllness({ label, cureChance: 0 })]))),
+      healthPhase(makeCtx(cureState, registryWith([makeIllness({ label, cureChance: 1 })]))),
+    ].map((entries) => entries[0]?.text);
+
+    expect(texts).toEqual([
+      'You came down with a bad back.',
+      'You are getting seriously ill with a bad back.',
+      'You recovered from a bad back.',
+    ]);
   });
 
   it('keeps a treated illness that fails its cure roll, without damage', () => {
@@ -214,6 +292,19 @@ describe('healthPhase progression', () => {
     expect(state.character.stats.health).toBe(75);
   });
 
+  /* The contract on `IllnessDef.chronic`: chronic conditions persist once
+     contracted instead of resolving on their own, whatever `cureChance` says. */
+  it('never resolves an untreated chronic illness, however curable it claims to be', () => {
+    const reg = registryWith([makeIllness({ chronic: true, cureChance: 1, healthHit: 10 })]);
+    const state = makeState({ illnesses: [{ defId: 'flu', years: 1, treated: false }] });
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([{ defId: 'flu', years: 2, treated: false }]);
+    expect(state.character.stats.health).toBe(75);
+    expect(entries).toEqual([]);
+  });
+
   it('ignores an illness whose definition is gone from the registry', () => {
     const state = makeState({ illnesses: [{ defId: 'ghost', years: 1, treated: false }] });
 
@@ -221,6 +312,53 @@ describe('healthPhase progression', () => {
 
     expect(entries).toEqual([]);
     expect(state.character.stats.health).toBe(80);
+    // No definition, no roll: an unknown illness cannot shift the draw budget.
+    expect(state.rngState).toBe(initialRngState(SEED));
+  });
+});
+
+describe('healthPhase recovery draw budget', () => {
+  /** Cursor after one year, minus the cursor a mirror reaches with `draws` rolls. */
+  function drawsSpent(state: GameState): number {
+    const mirror = { rngState: initialRngState(SEED) };
+    const rng = createRng(mirror);
+    for (let spent = 0; spent <= 4; spent += 1) {
+      if (mirror.rngState === state.rngState) return spent;
+      rng.chance(0.5);
+    }
+    return -1;
+  }
+
+  it('spends one recovery roll a year on a non-chronic illness, treated or not', () => {
+    const reg = registryWith([makeIllness({ cureChance: 0 })]);
+    for (const treated of [false, true]) {
+      const state = makeState({ illnesses: [{ defId: 'flu', years: 1, treated }] });
+      healthPhase(makeCtx(state, reg));
+      expect(drawsSpent(state)).toBe(1);
+    }
+  });
+
+  it('spends nothing on a chronic illness, which can never resolve', () => {
+    const reg = registryWith([makeIllness({ chronic: true, cureChance: 1 })]);
+    for (const treated of [false, true]) {
+      const state = makeState({ illnesses: [{ defId: 'flu', years: 1, treated }] });
+      healthPhase(makeCtx(state, reg));
+      expect(drawsSpent(state)).toBe(0);
+    }
+  });
+
+  it('rolls onset for what is not held and recovery for what is, in that order', () => {
+    const reg = registryWith([
+      makeIllness({ id: 'flu', label: 'the flu', cureChance: 0 }),
+      makeIllness({ id: 'gout', label: 'gout', onsetWeight: () => 0, cureChance: 0 }),
+      makeIllness({ id: 'asthma', label: 'asthma', chronic: true, onsetWeight: () => 0 }),
+    ]);
+    const state = makeState({ illnesses: [{ defId: 'flu', years: 1, treated: false }] });
+
+    healthPhase(makeCtx(state, reg));
+
+    // Two unheld defs roll onset; the one held non-chronic illness rolls recovery.
+    expect(drawsSpent(state)).toBe(3);
   });
 });
 
@@ -280,12 +418,19 @@ describe('healthPhase addictions', () => {
 describe('healthPhase determinism', () => {
   it('produces the same year twice from the same seed', () => {
     const defs = [
-      makeIllness({ id: 'flu', label: 'influenza', onsetWeight: () => 0.5 }),
+      makeIllness({ id: 'flu', label: 'the flu', onsetWeight: () => 0.5 }),
       makeIllness({ id: 'asthma', label: 'asthma', chronic: true, onsetWeight: () => 0.5 }),
       makeIllness({ id: 'gout', label: 'gout', onsetWeight: () => 0.5, healthHit: 8 }),
     ];
     const run = (): { entries: unknown; character: unknown; cursor: number } => {
-      const state = makeState({ addictions: { alcohol: 20 } });
+      const state = makeState({
+        addictions: { alcohol: 20 },
+        // Carried conditions add the recovery rolls to the sequence under test.
+        illnesses: [
+          { defId: 'gout', years: 2, treated: false },
+          { defId: 'asthma', years: 5, treated: true },
+        ],
+      });
       const entries = healthPhase(makeCtx(state, registryWith(defs)));
       return { entries, character: state.character, cursor: state.rngState };
     };

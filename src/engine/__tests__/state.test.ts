@@ -27,7 +27,8 @@ vi.mock('@/engine/ageUp', () => ({
   resolveChoice: (): void => undefined,
 }));
 
-import { addPerson, createLife, emigrateTo, pronounsFor } from '@/engine/state';
+import { killCharacter } from '@/engine/death';
+import { addPerson, createLife, emigrateTo, lifeIsOver, pronounsFor } from '@/engine/state';
 
 const US: CountryDef = {
   id: 'us',
@@ -486,5 +487,38 @@ describe('emigrateTo', () => {
     state.rngState = 12345;
     emigrateTo(state, testRegistry(), 'jp');
     expect(state.rngState).not.toBe(12345);
+  });
+
+  it('refuses once the life is over, charging nothing and rolling nothing', () => {
+    const state = adult();
+    killCharacter(state, testRegistry(), 'a heart attack');
+    const character = JSON.stringify(state.character);
+    const cursor = state.rngState;
+    const feed = state.log[state.log.length - 1].entries.length;
+
+    expect(emigrateTo(state, testRegistry(), 'jp')).toEqual({ ok: false, reason: 'life-over' });
+
+    expect(JSON.stringify(state.character)).toBe(character);
+    // No $2,000 visa fee against a settled estate, and no visa stamp either.
+    expect(state.character.money).toBe(10000);
+    expect(state.character.flags.lastVisaAge).toBeUndefined();
+    /* The roll must not happen: a draw here would advance the cursor past the
+       end of the life, and the entry would land after the obituary. */
+    expect(state.rngState).toBe(cursor);
+    expect(state.log[state.log.length - 1].entries).toHaveLength(feed);
+    expect(state.death?.epitaphStats.netWorth).toBe(10000);
+  });
+});
+
+describe('lifeIsOver', () => {
+  it('is true only once the life has ended', () => {
+    const state = createLife(testRegistry(), { seed: 61 });
+
+    expect(lifeIsOver(state)).toBe(false);
+    // A queued choice pauses the year; it does not finish the life.
+    state.phase = 'awaitingChoice';
+    expect(lifeIsOver(state)).toBe(false);
+    state.phase = 'dead';
+    expect(lifeIsOver(state)).toBe(true);
   });
 });

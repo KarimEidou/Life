@@ -204,6 +204,39 @@ describe('fillTemplate', () => {
     const state = makeState(makeCharacter({ firstName: '{age}' }));
     expect(fillTemplate('{firstName}', state)).toBe('{age}');
   });
+
+  it('never resolves inherited Object.prototype keys', () => {
+    const state = makeState(makeCharacter());
+    // Lowercase forms used to substitute a native function into the feed.
+    expect(fillTemplate('x {toString} y', state)).toBe('x {toString} y');
+    expect(fillTemplate('x {valueOf} y', state)).toBe('x {valueOf} y');
+    expect(fillTemplate('x {constructor} y', state)).toBe('x {constructor} y');
+    expect(fillTemplate('x {hasOwnProperty} y', state)).toBe('x {hasOwnProperty} y');
+    expect(fillTemplate('x {__proto__} y', state)).toBe('x {__proto__} y');
+    expect(fillTemplate('x {__defineGetter__} y', state)).toBe('x {__defineGetter__} y');
+  });
+
+  it('leaves capitalised prototype keys visible instead of throwing', () => {
+    const state = makeState(makeCharacter());
+    // The capitalisation fallback used to call `.charAt` on a native function.
+    expect(fillTemplate('{ToString}', state)).toBe('{ToString}');
+    expect(fillTemplate('{ValueOf}', state)).toBe('{ValueOf}');
+    expect(fillTemplate('{Constructor}', state)).toBe('{Constructor}');
+    expect(fillTemplate('{HasOwnProperty}', state)).toBe('{HasOwnProperty}');
+    expect(fillTemplate('{IsPrototypeOf}', state)).toBe('{IsPrototypeOf}');
+    // Real capitalised tokens keep working alongside them.
+    expect(fillTemplate('{He} typed {ToString}.', state)).toBe('She typed {ToString}.');
+  });
+
+  it('survives a player-typed name that looks like a prototype token', () => {
+    // `firstName` is player input and resolveText re-scans builder output that
+    // interpolates it, so the formatter must stay total on any string.
+    const state = makeState(makeCharacter({ firstName: '{ToString}' }));
+    expect(fillTemplate(`A stranger called ${state.character.firstName} waves.`, state)).toBe(
+      'A stranger called {ToString} waves.'
+    );
+    expect(fillTemplate('{firstName} is {age}.', state)).toBe('{ToString} is 34.');
+  });
 });
 
 describe('resolveText', () => {
@@ -216,5 +249,11 @@ describe('resolveText', () => {
     const ctx = makeCtx(makeState(makeCharacter({ money: 4200 })));
     const built = resolveText((c) => `{name} has ${c.c.money} left.`, ctx);
     expect(built).toBe('Ada Moreno has 4200 left.');
+  });
+
+  it('does not throw when a builder echoes a prototype-shaped player name', () => {
+    const ctx = makeCtx(makeState(makeCharacter({ firstName: '{ToString}' })));
+    const built = resolveText((c) => `A stranger called ${c.c.firstName} waves.`, ctx);
+    expect(built).toBe('A stranger called {ToString} waves.');
   });
 });

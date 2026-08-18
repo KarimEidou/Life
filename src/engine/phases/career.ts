@@ -10,6 +10,7 @@
 import { currentYearLog } from '@/engine/ageUp';
 import { clampStat } from '@/engine/effects';
 import { createRng } from '@/engine/rng';
+import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
   ContentRegistry,
   Ctx,
@@ -41,6 +42,9 @@ const LEVEL_LABEL: Record<EdLevel, string> = {
 /** Yearly performance drift, before noise and the sick-worker penalty. */
 const EFFORT_HARD = 8;
 const EFFORT_COASTING = 2;
+/** What the extra effort costs per worked year — the other half of the tradeoff. */
+const WORK_HARD_HEALTH = 1.5;
+const WORK_HARD_HAPPINESS = 1;
 const PERFORMANCE_SD = 4;
 const SICK_HEALTH = 30;
 const SICK_PENALTY = 5;
@@ -62,6 +66,10 @@ const SEVERANCE_SHARE = 0.1;
 
 const RETIREMENT_AGE = 70;
 const PENSION_SHARE = 0.3;
+/** Set the first time the character retires; retiring is a one-way door. */
+const RETIRED_FLAG = 'retired';
+/** Why no job is open to someone who has reached `RETIREMENT_AGE`. */
+const RETIRED_REASON = "You're past retirement age.";
 
 const RELEASE_RELIEF = 15;
 
@@ -121,7 +129,11 @@ function rollPromotion(ctx: Ctx, def: JobDef): LogEntry | undefined {
   return { icon: '🎉', kind: 'good', text: `You were promoted to ${next.title}.` };
 }
 
-/** Pays salary, moves performance, then rolls promotion, raise or firing. */
+/**
+ * Works one year: retires anyone old enough before the year starts, otherwise
+ * counts the service, moves performance and rolls promotion, firing or layoff.
+ * The wage itself is settled by the finance phase, which runs after this one.
+ */
 export function careerPhase(ctx: Ctx): LogEntry[] {
   const c = ctx.state.character;
   const entries: LogEntry[] = [];
@@ -141,6 +153,35 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
   const job = c.job;
   if (!job) return entries;
 
+  /* Retirement is settled before the year is worked rather than after it. The
+     finance phase reads `c.job` after this phase has run, so a seat emptied here
+     is never paid for: a year worked on the way out the door — service counted,
+     performance rolled, the cost of working hard charged — would be settled as a
+     pension year and the whole wage would vanish. At retirement age the
+     character simply stops working, so nothing is left worked and unpaid. Nobody
+     is promoted or laid off on their way out either. */
+  if (c.age >= RETIREMENT_AGE) {
+    const alreadyRetired = c.flags[RETIRED_FLAG] === true;
+    /* `jobRequirementsMet` turns applicants away from retirement age on, but a
+       job can still reach this age through a save or an effect, and every such
+       year passes back through here. Retiring is the one-time transition, not
+       the state: the line is written once, the pension only ever ratchets up,
+       and the title the obituary reads is the one held at retirement — so a
+       hobby job late in life can neither cut a career's pension down to 30% of
+       itself nor bury the career it is remembered by. */
+    c.flags.pensionSalary = Math.max(
+      counter(c.flags.pensionSalary),
+      Math.round(job.salary * PENSION_SHARE)
+    );
+    c.job = null;
+    if (!alreadyRetired) {
+      c.flags.lastJobTitle = job.title;
+      c.flags[RETIRED_FLAG] = true;
+      entries.push({ icon: '🏖️', kind: 'info', text: `You retired at ${c.age}.` });
+    }
+    return entries;
+  }
+
   job.years += 1;
   const effort = job.workHard ? EFFORT_HARD : EFFORT_COASTING;
   const drag = c.stats.health < SICK_HEALTH ? SICK_PENALTY : 0;
@@ -148,20 +189,17 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
     job.performance + effort + ctx.rng.normal(0, PERFORMANCE_SD) - drag
   );
 
-  const def = findJob(ctx.reg, job.jobId);
-  if (def) job.salary = Math.round(job.salary * (1 + def.raisePct));
-
-  /* Retirement is settled before the yearly rolls: nobody is promoted or laid
-     off on their way out the door. */
-  if (c.age >= RETIREMENT_AGE) {
-    c.flags.pensionSalary = Math.round(job.salary * PENSION_SHARE);
-    c.flags.lastJobTitle = job.title;
-    c.job = null;
-    entries.push({ icon: '🏖️', kind: 'info', text: `You retired at ${c.age}.` });
-    return entries;
+  /* The effort bonus is paid for in stats, charged for every year the switch was
+     on and the year was actually worked — the prison branch returned above. It
+     costs no draw, so the yearly rng budget is unchanged. */
+  if (job.workHard) {
+    c.stats.health = clampStat(c.stats.health - WORK_HARD_HEALTH);
+    c.stats.happiness = clampStat(c.stats.happiness - WORK_HARD_HAPPINESS);
   }
 
+  const def = findJob(ctx.reg, job.jobId);
   if (def) {
+    job.salary = Math.round(job.salary * (1 + def.raisePct));
     const promotion = rollPromotion(ctx, def);
     if (promotion) {
       entries.push(promotion);
@@ -187,7 +225,10 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
   return entries;
 }
 
-/** Checks a job's `req` gate: age, education level, major, stats and prior job. */
+/**
+ * Checks a job's `req` gate — age, education level, major, stats and prior job —
+ * behind the two states that rule out any job at all: prison and retirement.
+ */
 export function jobRequirementsMet(
   state: GameState,
   reg: ContentRegistry,
@@ -197,6 +238,11 @@ export function jobRequirementsMet(
   const req = job.req;
 
   if (c.prison) return { ok: false, reason: "You're in prison." };
+  /* Nobody is hired at retirement age. `careerPhase` turns a seat held then into
+     a pension at the top of the year, before the year is worked, so the hire
+     would be undone without ever paying a wage — and a job accepted and deleted
+     every year, one cheerful line at a time, is worse than a plain refusal. */
+  if (c.age >= RETIREMENT_AGE) return { ok: false, reason: RETIRED_REASON };
   if (req.minAge !== undefined && c.age < req.minAge) {
     return { ok: false, reason: `You must be ${req.minAge} to apply.` };
   }
@@ -234,6 +280,9 @@ export function applyForJob(
   reg: ContentRegistry,
   jobId: string
 ): { ok: boolean; reason?: string } {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return { ok: false, reason: LIFE_OVER };
+
   const c = state.character;
   const def = findJob(reg, jobId);
   if (!def) return { ok: false, reason: 'That job does not exist.' };
@@ -269,6 +318,9 @@ export function applyForJob(
 
 /** Leaves the current job immediately, ending its salary. */
 export function quitJob(state: GameState): void {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return;
+
   const c = state.character;
   const job = c.job;
   if (!job) return;
@@ -284,6 +336,9 @@ export function quitJob(state: GameState): void {
 
 /** Toggles working hard: better performance at the cost of health and happiness. */
 export function setWorkHard(state: GameState, on: boolean): void {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return;
+
   const job = state.character.job;
   if (job) job.workHard = on;
 }
@@ -293,6 +348,9 @@ export function askForRaise(
   state: GameState,
   reg: ContentRegistry
 ): { ok: boolean; text: string } {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return { ok: false, text: LIFE_OVER };
+
   const c = state.character;
   const job = c.job;
   if (!job) return { ok: false, text: 'You need a job first.' };

@@ -53,24 +53,32 @@ export function fillTemplate(text: string, state: GameState): string {
   if (text.indexOf('{') === -1) return text;
   const c = state.character;
   const partner = currentPartner(state);
-  const values: Record<string, string> = {
-    name: `${c.firstName} ${c.lastName}`.trim(),
-    firstName: c.firstName,
-    lastName: c.lastName,
-    he: c.pronouns.sub,
-    him: c.pronouns.obj,
-    his: c.pronouns.pos,
-    partner: partner ? partner.name : 'your partner',
-    // createLife stores the human-readable country label; the id is the fallback.
-    country: String(c.flags.countryLabel ?? c.countryId),
-    age: String(c.age),
+  // Null prototype: token text is player-reachable (a typed first name is echoed
+  // back through resolveText), so `{toString}` must not find an inherited member.
+  const values: Record<string, string> = Object.create(null) as Record<string, string>;
+  values.name = `${c.firstName} ${c.lastName}`.trim();
+  values.firstName = c.firstName;
+  values.lastName = c.lastName;
+  values.he = c.pronouns.sub;
+  values.him = c.pronouns.obj;
+  values.his = c.pronouns.pos;
+  values.partner = partner ? partner.name : 'your partner';
+  // createLife stores the human-readable country label; the id is the fallback.
+  values.country = String(c.flags.countryLabel ?? c.countryId);
+  values.age = String(c.age);
+  // Belt and braces: only an own string value ever leaves the table, so nothing
+  // non-string can reach `.charAt` below no matter how the table is built.
+  const lookup = (key: string): string | undefined => {
+    if (!Object.prototype.hasOwnProperty.call(values, key)) return undefined;
+    const found: unknown = values[key];
+    return typeof found === 'string' ? found : undefined;
   };
   return text.replace(/\{(\w+)\}/g, (whole: string, key: string): string => {
-    const direct = values[key];
+    const direct = lookup(key);
     if (direct !== undefined) return direct;
     // `{He}` / `{Partner}` at the start of a sentence resolve to a capitalised value.
     const lower = key.charAt(0).toLowerCase() + key.slice(1);
-    const alt = values[lower];
+    const alt = lookup(lower);
     if (alt === undefined) return whole; // unknown tokens stay visible instead of vanishing
     return alt.charAt(0).toUpperCase() + alt.slice(1);
   });

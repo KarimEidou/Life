@@ -10,6 +10,10 @@
 
 import { currentYearLog } from '@/engine/ageUp';
 import { clampStat } from '@/engine/effects';
+/* Finance owns loans, and student debt shares the id counter with every other
+   loan, so the id comes from there rather than from a second minting rule. */
+import { mintLoanId } from '@/engine/phases/finance';
+import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
   ContentRegistry,
   Ctx,
@@ -81,9 +85,16 @@ function gpaTooLow(ed: EducationState, def: SchoolDef): boolean {
   return minGpa !== undefined && ed.gpa > 0 && ed.gpa < minGpa;
 }
 
-/** Records a finished level and empties the desk. */
+/**
+ * Records a finished level and empties the desk.
+ *
+ * `EducationState.level` is the *highest* level completed, so it only ever
+ * ratchets upwards: finishing a bachelor's after a postgrad degree adds a
+ * qualification, it does not revoke one, and a job gated on `postgrad` must stay
+ * open. The desk is emptied either way — the programme really did end.
+ */
 function completeLevel(ed: EducationState, level: EdLevel): void {
-  ed.level = level;
+  if (LEVEL_ORDER[level] > LEVEL_ORDER[ed.level]) ed.level = level;
   ed.enrolledIn = undefined;
   ed.year = 0;
 }
@@ -155,12 +166,21 @@ function advanceDegree(ctx: Ctx, def: SchoolDef): LogEntry[] {
     if (c.money >= tuition) {
       c.money = Math.max(0, Math.round(c.money - tuition));
     } else {
-      c.loans.push({
-        id: `l${c.loans.length + 1}-${c.age}`,
-        kind: 'student',
-        principal: tuition,
-        apr: STUDENT_LOAN_APR,
-      });
+      /* One accumulating student debt, not one record per school year: minting a
+         fresh loan every year left a four-year degree owing four separate
+         debts, which the finance phase then paid off in the same year and
+         announced four times over with the same sentence. */
+      const held = c.loans.find((loan) => loan.kind === 'student');
+      if (held) {
+        held.principal += tuition;
+      } else {
+        c.loans.push({
+          id: mintLoanId(c),
+          kind: 'student',
+          principal: tuition,
+          apr: STUDENT_LOAN_APR,
+        });
+      }
       if (c.flags[LOAN_NOTICE_FLAG] !== true) {
         c.flags[LOAN_NOTICE_FLAG] = true;
         entries.push({ icon: '🏦', kind: 'money', text: 'You took a student loan.' });
@@ -185,6 +205,21 @@ export function educationPhase(ctx: Ctx): LogEntry[] {
   const ed = c.education;
   const enrolled = ed.enrolledIn !== undefined ? findSchool(ctx.reg, ed.enrolledIn) : undefined;
 
+  /* A save can outlive the content that defined the school it sits in. Nothing
+     downstream can move a desk no def describes: `advanceDegree` has no tuition,
+     length or label to work from, and the compulsory ladder refuses to enrol
+     anyone whose desk is still occupied, so the character would stay "in school"
+     for the rest of the life — never graduating, never re-enrolling, and refused
+     by `applyToSchool` every time. The desk is emptied instead, which hands the
+     character back to the ladder. `level` and `major` are what was actually
+     earned, so they stand; the level ratchet never moves backwards. Like
+     `ageUp`'s `discardPending`, this consumes no randomness, so the surrounding
+     sequence is untouched and the year replays identically. */
+  if (ed.enrolledIn !== undefined && !enrolled) {
+    ed.enrolledIn = undefined;
+    ed.year = 0;
+  }
+
   const entries =
     enrolled && isDegree(enrolled) ? advanceDegree(ctx, enrolled) : advanceCompulsory(ctx);
 
@@ -207,6 +242,9 @@ export function applyToSchool(
   schoolId: string,
   major?: string
 ): { ok: boolean; reason?: string } {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return { ok: false, reason: LIFE_OVER };
+
   const c = state.character;
   const ed = c.education;
   const def = findSchool(reg, schoolId);
@@ -216,6 +254,12 @@ export function applyToSchool(
   if (ed.enrolledIn !== undefined) return { ok: false, reason: 'You are already in school.' };
 
   if (def.level === 'university') {
+    /* A level already held cannot be advanced by sitting it again, so the
+       applicant is turned away rather than charged four years of tuition for
+       nothing. Checked before the diploma gate, which a graduate always passes. */
+    if (hasAtLeast(ed.level, 'university')) {
+      return { ok: false, reason: 'You already have a degree.' };
+    }
     if (!hasAtLeast(ed.level, 'high')) {
       return { ok: false, reason: 'You need a high school diploma.' };
     }
@@ -227,6 +271,10 @@ export function applyToSchool(
       if (!majors.includes(major)) return { ok: false, reason: 'That major is not offered.' };
     }
   } else {
+    // Same rule one rung up; see the university branch.
+    if (hasAtLeast(ed.level, 'postgrad')) {
+      return { ok: false, reason: 'You already have a postgraduate degree.' };
+    }
     if (!hasAtLeast(ed.level, 'university')) {
       return { ok: false, reason: 'You need a degree first.' };
     }
@@ -257,6 +305,9 @@ export function applyToSchool(
 
 /** Leaves the current school without completing it; the level stays as it was. */
 export function dropOut(state: GameState): void {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return;
+
   const c = state.character;
   const ed = c.education;
   if (ed.enrolledIn === undefined) return;
@@ -271,5 +322,8 @@ export function dropOut(state: GameState): void {
 
 /** Toggles studying hard: better GPA at the cost of happiness. */
 export function setStudyHard(state: GameState, on: boolean): void {
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return;
+
   state.character.education.studyHard = on;
 }

@@ -3,6 +3,23 @@
  *
  * Nothing here kills: `IllnessDef.lethality` is rolled by the death-check phase,
  * so this phase must never consume a draw on it.
+ *
+ * Draw budget for one year: one onset roll per registry illness the character is
+ * not already carrying, then one recovery roll per *non-chronic* illness held at
+ * the start of the year whose definition still exists. Both loops roll
+ * unconditionally — `rng.chance` always draws — so the budget is a function of
+ * the registry and of what is held, never of a probability or of whether the
+ * condition is being treated. Chronic conditions never resolve, so they are the
+ * one case that consumes no recovery draw.
+ *
+ * `Illness.treated` is a modifier, not a gate: treatment holds a condition steady
+ * (it stops costing health) and doubles the odds of shaking a non-chronic one off.
+ * Recovery has to work without it, because an untreated cold still passes.
+ *
+ * `IllnessDef.label` carries its own article ('the flu', 'a bad back') because the
+ * death line reads `You died of ${label}.`, so every sentence built here has to take
+ * the label as the object of a verb or preposition. A possessive frame (`Your
+ * ${label} ...`) would demand a bare noun and no single label can satisfy both.
  */
 
 import { clampStat } from '@/engine/effects';
@@ -17,6 +34,9 @@ import type {
 
 /** Health level a condition has to drag the character under to be worth a warning. */
 const SERIOUS_HEALTH = 30;
+
+/** How much treatment multiplies the yearly odds of shaking a condition off. */
+const TREATED_CURE_MULT = 2;
 
 /** Severity every live addiction gains each year it is left alone. */
 const ADDICTION_GROWTH = 3;
@@ -46,6 +66,12 @@ function findIllness(reg: ContentRegistry, id: string): IllnessDef | undefined {
   return byId[id] ?? reg.illnesses.find((def) => def.id === id);
 }
 
+/** Yearly odds of recovering: the def's own chance, doubled by treatment. */
+function cureOdds(def: IllnessDef, illness: Illness): number {
+  const p = def.cureChance * (illness.treated ? TREATED_CURE_MULT : 1);
+  return Math.min(1, Math.max(0, p));
+}
+
 /** Rolls new illnesses by onset weight, then ages and resolves the active ones. */
 export function healthPhase(ctx: Ctx): LogEntry[] {
   const entries: LogEntry[] = [];
@@ -72,21 +98,27 @@ export function healthPhase(ctx: Ctx): LogEntry[] {
     if (!def) continue;
     illness.years += 1;
 
-    if (!illness.treated) {
-      const before = c.stats.health;
-      c.stats.health = clampStat(before - def.healthHit / 2);
-      if (before >= SERIOUS_HEALTH && c.stats.health < SERIOUS_HEALTH) {
-        entries.push({ icon: '🤕', kind: 'bad', text: `Your ${def.label} is getting serious.` });
-      }
+    /* A chronic condition is held for life and takes no recovery draw; anything
+       else gets exactly one, treated or not — that roll is the whole reason a
+       cold ever ends. Recovering ends the year for this illness, so a year that
+       resolves costs no further health. */
+    if (!def.chronic && rng.chance(cureOdds(def, illness))) {
+      c.illnesses = c.illnesses.filter((other) => other !== illness);
+      entries.push({ icon: '💚', kind: 'good', text: `You recovered from ${def.label}.` });
       continue;
     }
 
-    // Treatment holds a chronic condition steady; it never resolves on its own.
-    if (def.chronic) continue;
+    // Treatment holds a still-active condition steady instead of curing it.
+    if (illness.treated) continue;
 
-    if (rng.chance(def.cureChance)) {
-      c.illnesses = c.illnesses.filter((other) => other !== illness);
-      entries.push({ icon: '💚', kind: 'good', text: `You recovered from ${def.label}.` });
+    const before = c.stats.health;
+    c.stats.health = clampStat(before - def.healthHit / 2);
+    if (before >= SERIOUS_HEALTH && c.stats.health < SERIOUS_HEALTH) {
+      entries.push({
+        icon: '🤕',
+        kind: 'bad',
+        text: `You are getting seriously ill with ${def.label}.`,
+      });
     }
   }
 

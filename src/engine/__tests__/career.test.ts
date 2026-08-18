@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { killCharacter } from '@/engine/death';
 import {
   applyForJob,
   askForRaise,
@@ -215,6 +216,23 @@ describe('careerPhase in prison', () => {
     expect(state.rngState).toBe(before);
   });
 
+  it('charges nothing for working hard from a cell', () => {
+    const state = newLife(25);
+    const c = state.character;
+    c.age = 30;
+    c.stats.health = 80;
+    c.stats.happiness = 60;
+    c.prison = { crime: 'burglary', yearsLeft: 3, totalYears: 5 };
+    c.job = jobState({ workHard: true, performance: 50 });
+
+    careerPhase(ctxFor(state));
+
+    // No work was done, so the effort switch costs nothing and buys nothing.
+    expect(c.stats.health).toBe(80);
+    expect(c.stats.happiness).toBe(60);
+    expect(c.job?.performance).toBe(50);
+  });
+
   it('opens the gate on the last year', () => {
     const state = newLife(3);
     state.character.age = 30;
@@ -239,10 +257,15 @@ describe('careerPhase at work', () => {
   it('does nothing for someone with no job', () => {
     const state = newLife(4);
     state.character.age = 30;
+    state.character.stats.health = 80;
+    state.character.stats.happiness = 60;
     const before = state.rngState;
 
     expect(careerPhase(ctxFor(state))).toEqual([]);
     expect(state.rngState).toBe(before);
+    // Nobody to work hard for, so no stat is charged either.
+    expect(state.character.stats.health).toBe(80);
+    expect(state.character.stats.happiness).toBe(60);
   });
 
   it('adds a year of service, drifts performance and pays the annual raise', () => {
@@ -260,16 +283,56 @@ describe('careerPhase at work', () => {
     expect(job?.performance).toBe(Math.round((52 + performanceNoise(11)) * 10) / 10);
   });
 
-  it('rewards working hard with six more points than coasting', () => {
-    const run = (workHard: boolean): number => {
+  it('rewards working hard with six more points, and charges health and happiness for them', () => {
+    interface Worked {
+      performance: number;
+      health: number;
+      happiness: number;
+    }
+    const run = (workHard: boolean): Worked => {
       const state = newLife(6);
-      state.character.age = 30;
-      state.character.job = jobState({ workHard, performance: 50 });
+      const c = state.character;
+      c.age = 30;
+      // Well clear of the sick-worker threshold, so only the effort moves stats.
+      c.stats.health = 80;
+      c.stats.happiness = 60;
+      c.job = jobState({ workHard, performance: 50 });
       state.rngState = initialRngState(12);
       careerPhase(ctxFor(state));
-      return state.character.job?.performance ?? 0;
+      return {
+        performance: c.job?.performance ?? 0,
+        health: c.stats.health,
+        happiness: c.stats.happiness,
+      };
     };
-    expect(Math.round((run(true) - run(false)) * 10) / 10).toBe(6);
+    const hard = run(true);
+    const coasting = run(false);
+
+    expect(Math.round((hard.performance - coasting.performance) * 10) / 10).toBe(6);
+    // Coasting is free.
+    expect(coasting.health).toBe(80);
+    expect(coasting.happiness).toBe(60);
+    // The six points are bought with 1.5 health and 1 happiness.
+    expect(hard.health).toBe(78.5);
+    expect(hard.happiness).toBe(59);
+  });
+
+  it('charges the effort again every year, and stops at the floor', () => {
+    const state = newLife(26);
+    const c = state.character;
+    c.age = 30;
+    c.stats.health = 33;
+    c.stats.happiness = 2.5;
+    // No def behind the id, so no promotion can cut the run short.
+    c.job = jobState({ jobId: 'ghost', title: 'Ghost', workHard: true, performance: 90 });
+    state.rngState = initialRngState(21);
+
+    for (let year = 0; year < 3; year += 1) careerPhase(ctxFor(state));
+
+    expect(c.job).not.toBeNull();
+    expect(c.stats.health).toBe(28.5);
+    // 2.5 -> 1.5 -> 0.5 -> clamped at the floor rather than going negative.
+    expect(c.stats.happiness).toBe(0);
   });
 
   it('costs a sick worker five points', () => {
@@ -347,6 +410,24 @@ describe('promotion', () => {
     );
     // 100000 x 1.03 annual raise, then 5% more for the promotion.
     expect(state.character.job?.salary).toBe(108150);
+  });
+
+  it('still charges the hard year that ends in a promotion', () => {
+    const { state } = forceBranch(
+      () => {
+        const s = promotable();
+        s.character.stats.health = 80;
+        s.character.stats.happiness = 60;
+        s.character.job = jobState({ years: 3, performance: 85, workHard: true });
+        return s;
+      },
+      (s) => careerPhase(ctxFor(s)),
+      (s) => s.character.job?.jobId === 'manager'
+    );
+
+    // The early return on a promotion does not refund the effort.
+    expect(state.character.stats.health).toBe(78.5);
+    expect(state.character.stats.happiness).toBe(59);
   });
 
   it('needs two years in the chair', () => {
@@ -473,20 +554,149 @@ describe('firing and layoffs', () => {
 --------------------------------------------------------------------------- */
 
 describe('retirement', () => {
-  it('retires a worker at 70 on 30% of their last salary', () => {
+  it('retires a worker at 70 on 30% of the salary they finished on', () => {
     const state = newLife(13);
     state.character.age = 70;
-    state.character.job = jobState({ salary: 30000 });
+    state.character.job = jobState({ salary: 30000, years: 12 });
     state.rngState = initialRngState(15);
+    const before = state.rngState;
 
     const entries = careerPhase(ctxFor(state));
     const c = state.character;
 
     expect(entries).toEqual([{ icon: '🏖️', kind: 'info', text: 'You retired at 70.' }]);
     expect(c.job).toBeNull();
-    // 30000 plus the 3% raise, then 30% of that.
-    expect(c.flags.pensionSalary).toBe(9270);
+    // 30% of the 30000 the last worked year left them on.
+    expect(c.flags.pensionSalary).toBe(9000);
     expect(c.flags.lastJobTitle).toBe('Clerk');
+    expect(c.flags.retired).toBe(true);
+    // The retirement year is not worked, so it rolls nothing.
+    expect(state.rngState).toBe(before);
+  });
+
+  it('works the year before retirement and none of the retirement year', () => {
+    const state = newLife(27);
+    const c = state.character;
+    c.age = 69;
+    c.stats.health = 80;
+    c.stats.happiness = 60;
+    c.job = jobState({ workHard: true, years: 3 });
+    state.rngState = initialRngState(17);
+
+    careerPhase(ctxFor(state));
+
+    // 69 is an ordinary year: service counted, annual raise paid, effort charged.
+    expect(c.job?.years).toBe(4);
+    expect(c.job?.salary).toBe(30900);
+    expect(c.stats.health).toBe(78.5);
+    expect(c.stats.happiness).toBe(59);
+
+    c.age = 70;
+    const health = c.stats.health;
+    const happiness = c.stats.happiness;
+    const cursor = state.rngState;
+
+    const entries = careerPhase(ctxFor(state));
+
+    /* The finance phase reads `c.job` after this one, so a year worked on the
+       way out the door would never be paid for. Nothing is worked, so nothing is
+       charged for it and no draw is spent on it. */
+    expect(texts(entries)).toEqual(['You retired at 70.']);
+    expect(c.job).toBeNull();
+    expect(c.stats.health).toBe(health);
+    expect(c.stats.happiness).toBe(happiness);
+    expect(state.rngState).toBe(cursor);
+    // 30% of the 30900 the last worked year ended on.
+    expect(c.flags.pensionSalary).toBe(9270);
+  });
+
+  it('retires once, and a later job buries neither the pension nor the career', () => {
+    const state = newLife(28);
+    const c = state.character;
+    c.age = 70;
+    c.job = jobState({ jobId: 'manager', title: 'Manager', salary: 400000, years: 10 });
+    state.rngState = initialRngState(31);
+
+    const first = careerPhase(ctxFor(state));
+
+    expect(texts(first)).toEqual(['You retired at 70.']);
+    expect(c.flags.pensionSalary).toBe(120000);
+    expect(c.flags.lastJobTitle).toBe('Manager');
+    expect(c.job).toBeNull();
+
+    /* Hiring is closed from 70 on, but a job can still reach this age through a
+       save or an effect — and a $12,000 one must restate neither a $120,000
+       pension nor the title the obituary reads. */
+    c.age = 71;
+    c.job = jobState({
+      jobId: 'barista',
+      title: 'Barista',
+      salary: 12000,
+      years: 0,
+      performance: 60,
+    });
+    const cursor = state.rngState;
+
+    const second = careerPhase(ctxFor(state));
+
+    expect(texts(second)).toEqual([]);
+    expect(c.job).toBeNull();
+    expect(c.flags.pensionSalary).toBe(120000);
+    expect(c.flags.lastJobTitle).toBe('Manager');
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('says it once across a decade of odd jobs after 70', () => {
+    const state = newLife(29);
+    const c = state.character;
+    c.age = 70;
+    c.job = jobState({ jobId: 'manager', title: 'Manager', salary: 200000, years: 10 });
+    state.rngState = initialRngState(33);
+
+    const feed: string[] = [];
+    const pensions: number[] = [];
+    const titles: (string | undefined)[] = [];
+    for (let year = 0; year < 10; year += 1) {
+      feed.push(...texts(careerPhase(ctxFor(state))));
+      pensions.push(Number(c.flags.pensionSalary));
+      titles.push(String(c.flags.lastJobTitle));
+      c.age += 1;
+      // Planted back in the seat every year, always for a fraction of the career.
+      c.job = jobState({
+        jobId: 'barista',
+        title: 'Barista',
+        salary: 12000,
+        years: 0,
+        performance: 60,
+      });
+    }
+
+    expect(feed).toEqual(['You retired at 70.']);
+    // 30% of the 200000 the career ended on.
+    expect(pensions[0]).toBe(60000);
+    expect(pensions).toEqual(pensions.map(() => 60000));
+    expect(titles).toEqual(titles.map(() => 'Manager'));
+  });
+
+  it('remembers the career in the obituary, not the job that came after it', () => {
+    const state = newLife(31);
+    const c = state.character;
+    c.age = 70;
+    c.flags.jobsHeld = 4;
+    c.job = jobState({ jobId: 'manager', title: 'Manager', salary: 200000, years: 20 });
+    state.rngState = initialRngState(51);
+
+    expect(texts(careerPhase(ctxFor(state)))).toEqual(['You retired at 70.']);
+
+    // Five years on, a hobby job is refused rather than taken and quietly deleted.
+    c.age = 75;
+    expect(applyForJob(state, REG, 'barista').ok).toBe(false);
+    expect(c.job).toBeNull();
+
+    killCharacter(state, REG, 'natural causes');
+
+    expect(state.death?.obituary).toContain('Manager.');
+    expect(state.death?.obituary).not.toContain('Barista');
   });
 
   it('leaves a 69-year-old at their desk', () => {
@@ -533,6 +743,23 @@ describe('jobRequirementsMet', () => {
       ok: false,
       reason: "You're in prison.",
     });
+  });
+
+  it('refuses anyone who has reached retirement age', () => {
+    const state = surgeonReady();
+
+    state.character.age = 69;
+    expect(jobRequirementsMet(state, REG, jobDef('surgeon'))).toEqual({ ok: true });
+
+    state.character.age = 70;
+    expect(jobRequirementsMet(state, REG, jobDef('surgeon'))).toEqual({
+      ok: false,
+      reason: "You're past retirement age.",
+    });
+    // Not even the part-time job with no requirements of its own.
+    expect(jobRequirementsMet(state, REG, jobDef('barista')).reason).toBe(
+      "You're past retirement age."
+    );
   });
 
   it('refuses an applicant below the minimum age', () => {
@@ -664,6 +891,39 @@ describe('applyForJob', () => {
     expect(state.character.job).toBeNull();
   });
 
+  it('turns a retirement-age applicant away without spending a draw on them', () => {
+    const state = applicant();
+    state.character.age = 70;
+    state.rngState = initialRngState(7);
+    const cursor = state.rngState;
+    const feed = state.log[state.log.length - 1].entries.length;
+
+    expect(applyForJob(state, REG, 'barista')).toEqual({
+      ok: false,
+      reason: "You're past retirement age.",
+    });
+    /* Accepting the job would be worse than refusing it: `careerPhase` deletes a
+       seat held at this age at the top of the next year, before the year is
+       worked, so the wage would never reach the finance phase. */
+    expect(state.character.job).toBeNull();
+    expect(state.character.flags.jobsHeld).toBeUndefined();
+    expect(state.rngState).toBe(cursor);
+    expect(state.log[state.log.length - 1].entries).toHaveLength(feed);
+  });
+
+  it('still hires at 69', () => {
+    const { state } = forceBranch(
+      () => {
+        const s = applicant();
+        s.character.age = 69;
+        return s;
+      },
+      (s) => applyForJob(s, REG, 'barista'),
+      (s, result) => result.ok
+    );
+    expect(state.character.job?.title).toBe('Barista');
+  });
+
   it('refuses a job the registry does not list', () => {
     const state = applicant();
     expect(applyForJob(state, REG, 'astronaut')).toEqual({
@@ -784,6 +1044,42 @@ describe('askForRaise', () => {
 });
 
 /* ---------------------------------------------------------------------------
+   A finished life
+--------------------------------------------------------------------------- */
+
+describe('career actions after death', () => {
+  it('refuses every one of them and leaves the life exactly as it was', () => {
+    const state = newLife(30);
+    const c = state.character;
+    c.age = 40;
+    c.education.level = 'high';
+    c.stats.happiness = 60;
+    state.rngState = initialRngState(41);
+    while (!c.job) applyForJob(state, REG, 'clerk');
+    c.job.years = 3;
+    c.job.performance = 90;
+
+    killCharacter(state, REG, 'a heart attack');
+    const character = JSON.stringify(c);
+    const cursor = state.rngState;
+    const feed = state.log[state.log.length - 1].entries.length;
+
+    expect(applyForJob(state, REG, 'barista')).toEqual({
+      ok: false,
+      reason: 'Your life is over.',
+    });
+    expect(askForRaise(state, REG)).toEqual({ ok: false, text: 'Your life is over.' });
+    quitJob(state);
+    setWorkHard(state, true);
+
+    expect(JSON.stringify(c)).toBe(character);
+    // A refused action neither spends a draw nor writes a line after the obituary.
+    expect(state.rngState).toBe(cursor);
+    expect(state.log[state.log.length - 1].entries).toHaveLength(feed);
+  });
+});
+
+/* ---------------------------------------------------------------------------
    A whole working life
 --------------------------------------------------------------------------- */
 
@@ -811,6 +1107,9 @@ describe('a career played out', () => {
     state.character.stats.smarts = 90;
     state.rngState = initialRngState(99);
 
+    const startHealth = state.character.stats.health;
+    const startHappiness = state.character.stats.happiness;
+
     const titles = new Set<string>();
     for (let year = 0; year < 55; year += 1) {
       if (!state.character.job) applyForJob(state, REG, 'clerk');
@@ -823,5 +1122,8 @@ describe('a career played out', () => {
     expect(titles.has('Manager')).toBe(true);
     expect(state.character.job).toBeNull();
     expect(Number(state.character.flags.pensionSalary)).toBeGreaterThan(0);
+    // A lifetime of grinding leaves a mark: no career is climbed for free.
+    expect(state.character.stats.health).toBeLessThan(startHealth);
+    expect(state.character.stats.happiness).toBeLessThan(startHappiness);
   });
 });
