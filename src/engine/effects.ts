@@ -13,7 +13,7 @@ const FAMILY_KINDS: readonly RelKind[] = ['mother', 'father', 'sibling', 'child'
 
 /** Clamps a stat into 0..100 and rounds it to one decimal place. */
 export function clampStat(n: number): number {
-  if (!Number.isFinite(n)) return 0;
+  if (Number.isNaN(n)) return 0;
   const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
   return Math.round(bounded * 10) / 10;
 }
