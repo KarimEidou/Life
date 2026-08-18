@@ -1,0 +1,198 @@
+/* =============================================================================
+   One Life — design tokens
+   iOS 17 system palette, type scale, metrics and motion.
+
+   Light values live on :root. The dark values are declared TWICE on purpose:
+     1. [data-theme="dark"]  — the in-app toggle, written by applyTheme().
+     2. @media (prefers-color-scheme: dark) :root:not([data-theme="light"])
+        — so the very first paint is already correct before any JS has run,
+        while still losing to an explicit "light" choice.
+   Keep the two dark blocks byte-for-byte identical.
+   ============================================================================= */
+
+:root {
+  color-scheme: light;
+
+  /* ---- System accent colours ------------------------------------------- */
+  --c-blue: #007aff;
+  --c-green: #34c759;
+  --c-red: #ff3b30;
+  --c-orange: #ff9500;
+  --c-yellow: #ffcc00;
+  --c-purple: #af52de;
+  --c-teal: #30b0c7;
+  --c-pink: #ff2d55;
+  --c-gray: #8e8e93;
+
+  /* ---- Backgrounds ------------------------------------------------------ */
+  --bg: #f2f2f7;
+  --bg-elevated: #ffffff;
+  --bg-elevated-2: #ffffff;
+
+  /* ---- Fills (translucent, for chips, tracks, pressed states) ----------- */
+  --fill: rgba(120, 120, 128, 0.2);
+  --fill-2: rgba(120, 120, 128, 0.16);
+  --fill-3: rgba(118, 118, 128, 0.12);
+
+  /* ---- Labels ----------------------------------------------------------- */
+  --label: #000000;
+  --label-2: rgba(60, 60, 67, 0.6);
+  --label-3: rgba(60, 60, 67, 0.3);
+
+  /* ---- Separators ------------------------------------------------------- */
+  --separator: rgba(60, 60, 67, 0.29);
+  --separator-opaque: #c6c6c8;
+  /* Sub-pixel hairline: matches the 1px-at-2x rule iOS draws for list rules. */
+  --hairline: 0.5px;
+
+  /* ---- Translucent chrome (nav bar / tab bar), pair with --bar-blur ------ */
+  --bar-bg: rgba(249, 249, 249, 0.82);
+  --bar-blur: saturate(180%) blur(20px);
+
+  /* ---- Type scale: size + matching weight ------------------------------- */
+  --fs-large-title: 34px;
+  --fw-large-title: 700;
+  --fs-title1: 28px;
+  --fw-title1: 700;
+  --fs-title2: 22px;
+  --fw-title2: 700;
+  --fs-title3: 20px;
+  --fw-title3: 600;
+  --fs-headline: 17px;
+  --fw-headline: 600;
+  --fs-body: 17px;
+  --fw-body: 400;
+  --fs-callout: 16px;
+  --fw-callout: 400;
+  --fs-subhead: 15px;
+  --fw-subhead: 400;
+  --fs-footnote: 13px;
+  --fw-footnote: 400;
+  --fs-caption: 11px;
+  --fw-caption: 400;
+
+  /* ---- Line heights, mirroring Apple's leading table -------------------- */
+  --lh-large-title: 41px;
+  --lh-title1: 34px;
+  --lh-title2: 28px;
+  --lh-title3: 25px;
+  --lh-headline: 22px;
+  --lh-body: 22px;
+  --lh-callout: 21px;
+  --lh-subhead: 20px;
+  --lh-footnote: 18px;
+  --lh-caption: 13px;
+
+  /* Tracking. SF Pro already carries optical tracking, so only display text
+     and all-caps micro labels get an explicit nudge. */
+  --ls-tight: -0.02em;
+  --ls-wide: 0.06em;
+
+  /* ---- Radii ------------------------------------------------------------ */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-full: 999px;
+
+  /* ---- Spacing (4px grid) ----------------------------------------------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* ---- Elevation -------------------------------------------------------- */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 20px rgba(0, 0, 0, 0.06);
+
+  /* ---- Motion ----------------------------------------------------------- */
+  --t-fast: 150ms;
+  --t-med: 300ms;
+  --t-slow: 500ms;
+  --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ---- Safe areas ------------------------------------------------------- */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* ---- Stat semantics ---------------------------------------------------
+     Declared once: these var() references resolve against whichever accent
+     values are in force on this same element, so they follow the theme. */
+  --stat-high: var(--c-green);
+  --stat-mid: var(--c-yellow);
+  --stat-low: var(--c-red);
+}
+
+/* ---- Dark: explicit in-app override ------------------------------------ */
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --c-blue: #0a84ff;
+  --c-green: #30d158;
+  --c-red: #ff453a;
+  --c-orange: #ff9f0a;
+  --c-yellow: #ffd60a;
+  --c-purple: #bf5af2;
+  --c-teal: #40c8e0;
+  --c-pink: #ff375f;
+  --c-gray: #8e8e93;
+
+  --bg: #000000;
+  --bg-elevated: #1c1c1e;
+  --bg-elevated-2: #2c2c2e;
+
+  --fill: rgba(120, 120, 128, 0.36);
+  --fill-2: rgba(120, 120, 128, 0.32);
+  --fill-3: rgba(118, 118, 128, 0.24);
+
+  --label: #ffffff;
+  --label-2: rgba(235, 235, 245, 0.6);
+  --label-3: rgba(235, 235, 245, 0.3);
+
+  --separator: rgba(84, 84, 88, 0.6);
+  --separator-opaque: #38383a;
+
+  --bar-bg: rgba(29, 29, 31, 0.72);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.6);
+}
+
+/* ---- Dark: first paint, before applyTheme() has run --------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --c-blue: #0a84ff;
+    --c-green: #30d158;
+    --c-red: #ff453a;
+    --c-orange: #ff9f0a;
+    --c-yellow: #ffd60a;
+    --c-purple: #bf5af2;
+    --c-teal: #40c8e0;
+    --c-pink: #ff375f;
+    --c-gray: #8e8e93;
+
+    --bg: #000000;
+    --bg-elevated: #1c1c1e;
+    --bg-elevated-2: #2c2c2e;
+
+    --fill: rgba(120, 120, 128, 0.36);
+    --fill-2: rgba(120, 120, 128, 0.32);
+    --fill-3: rgba(118, 118, 128, 0.24);
+
+    --label: #ffffff;
+    --label-2: rgba(235, 235, 245, 0.6);
+    --label-3: rgba(235, 235, 245, 0.3);
+
+    --separator: rgba(84, 84, 88, 0.6);
+    --separator-opaque: #38383a;
+
+    --bar-bg: rgba(29, 29, 31, 0.72);
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.6);
+  }
+}
