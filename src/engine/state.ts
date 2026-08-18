@@ -119,14 +119,65 @@ function rollLastName(rng: Rng, pool: NamePool | undefined): string {
   return FALLBACK_LAST_NAME;
 }
 
+/** Shape every minted `Person.id` has, and the only shape the rebuild counts. */
+const PERSON_ID_PATTERN = /^p(\d+)$/;
+
+/**
+ * The counter as a usable id number, or `undefined` when it cannot be trusted.
+ *
+ * `nextPersonId` is an ordinary entry in `Character.flags`: content writes flags
+ * through `{ kind: 'flag' }` with no reserved-name protection, and a save is
+ * just JSON, so this may hold a string, a boolean, zero, a fraction, NaN or
+ * Infinity. Anything but a whole number the ids can actually be built from is
+ * refused here and rebuilt from the table instead. Non-finite and unsafe
+ * magnitudes are refused too: they either stringify into an id no scheme could
+ * mint (`p1e+300`) or stop advancing when incremented, which would hand the same
+ * id out forever.
+ */
+function counterValue(raw: boolean | number | string | undefined): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) {
+    return undefined;
+  }
+  const floored = Math.floor(raw);
+  return Number.isSafeInteger(floored) ? floored : undefined;
+}
+
+/** Highest `p<n>` the table already holds, or 0 when it holds none. */
+function highestPersonNumber(people: GameState['people']): number {
+  let highest = 0;
+  for (const id of Object.keys(people)) {
+    const match = PERSON_ID_PATTERN.exec(id);
+    if (!match) {
+      continue;
+    }
+    const n = Number(match[1]);
+    if (Number.isSafeInteger(n) && n > highest) {
+      highest = n;
+    }
+  }
+  return highest;
+}
+
 /**
  * Registers a person and hands back the stored object.
  * The only supported way to mint a `Person.id`, so ids stay unique per life.
+ *
+ * A missing or damaged counter is rebuilt from `state.people` rather than
+ * restarted at 1. The loan and asset minters may restart theirs, because the ids
+ * a pre-counter save holds were minted in a shape those schemes never produce;
+ * that argument does not transfer here, since `p<n>` is exactly the shape this
+ * table is keyed by, so restarting would re-mint an id that is still live. The
+ * store below then replaces that person in place — silently, with every log line
+ * and `{ who: 'p1' }` reference now pointing at the newcomer — so the id is
+ * additionally walked past anything the table already holds before it is used.
+ * That probe terminates: each step it takes consumes a distinct existing key.
  */
 export function addPerson(state: GameState, p: Omit<Person, 'id'>): Person {
   const flags = state.character.flags;
-  const nextRaw = flags.nextPersonId;
-  const next = typeof nextRaw === 'number' && nextRaw >= 1 ? Math.floor(nextRaw) : 1;
+  let next = counterValue(flags.nextPersonId) ?? highestPersonNumber(state.people) + 1;
+  while (Object.prototype.hasOwnProperty.call(state.people, `p${next}`)) {
+    next += 1;
+  }
   const person: Person = { ...p, id: `p${next}` };
   flags.nextPersonId = next + 1;
   state.people[person.id] = person;

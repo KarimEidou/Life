@@ -7,7 +7,7 @@
 
 import { currentYearLog } from '@/engine/ageUp';
 import { killCharacter } from '@/engine/death';
-import { applyEffects } from '@/engine/effects';
+import { applyEffects, clampMoney, personById } from '@/engine/effects';
 import { fillTemplate, fmtMoney } from '@/engine/format';
 import { createRng } from '@/engine/rng';
 import type {
@@ -66,30 +66,76 @@ function settleDeath(state: GameState, reg: ContentRegistry): void {
 /**
  * Checks that the life is still running, then the age window, condition,
  * cooldown and whether the cost is affordable.
+ *
+ * The price is evaluated **exactly once** here and handed back as `cost`, which
+ * is the number the caller must charge. `def.cost` may be a function, and a
+ * priced function may draw from `ctx.rng`, so asking for the price a second
+ * time would bill an amount this gate never validated — and burn a second draw.
+ * `cost` is absent only when an earlier gate refused before the price was ever
+ * needed: nothing runs then, so nothing is charged. `runInteraction` must
+ * charge `gate.cost` rather than re-pricing the def.
+ *
+ * Draw budget: **asking is always free.** Both `condition` and `cost` may draw,
+ * so the cursor is rewound before *every* return, refusal and approval alike —
+ * this is a read, and a read must never re-roll the future events, illnesses,
+ * promotions and death checks that hang off the same cursor. It is the sheet
+ * that makes that matter: `availableInteractions` documents a `canUse` per row
+ * before enabling it, on rows the player never runs, and the budget used to
+ * depend on the answer — a blocked row was free to re-price as often as it
+ * repainted while an *affordable* one silently advanced the life on every
+ * repaint. Whether looking at a row cost a character their future came down to
+ * whether they happened to be able to afford it.
+ *
+ * The draws a passing gate spent are not thrown away, they are handed back as
+ * `rngState`: the cursor as it stood after `condition` and `cost` ran. Exactly
+ * one caller is entitled to spend it — `runInteraction`, which is about to
+ * charge the player the price those draws priced — and it adopts it the moment
+ * the gate passes. That keeps `def.cost` evaluated exactly once per use, with no
+ * re-pricing and no second draw. It is absent when the gate spent nothing (an
+ * unpriced row, or a `ctx.rng` built on a detached cursor), because then there
+ * is nothing to adopt.
+ *
+ * Only the cursor is rewound. A `condition` or `cost` that mutates anything else
+ * is a content bug — they are asked a question, not told to act.
  */
-export function canUse(ctx: Ctx, def: InteractionDef): { ok: boolean; reason?: string } {
+export function canUse(
+  ctx: Ctx,
+  def: InteractionDef
+): { ok: boolean; reason?: string; cost?: number; rngState?: number } {
   const c = ctx.state.character;
   const age = c.age;
 
-  // A finished life is read-only: no action may touch it or its epitaph stats.
-  if (ctx.state.phase === 'dead') return { ok: false, reason: LIFE_OVER };
+  // Snapshotted before any gate can draw; restored by every return below.
+  const cursor = ctx.state.rngState;
+  type Refusal = { ok: boolean; reason: string; cost?: number };
+  const refuse = (reason: string, cost?: number): Refusal => {
+    ctx.state.rngState = cursor;
+    return cost === undefined ? { ok: false, reason } : { ok: false, reason, cost };
+  };
 
-  if (age < (def.minAge ?? 0)) return { ok: false, reason: "You're too young." };
-  if (age > (def.maxAge ?? DEFAULT_MAX_AGE)) return { ok: false, reason: "You're too old." };
+  // A finished life is read-only: no action may touch it or its epitaph stats.
+  if (ctx.state.phase === 'dead') return refuse(LIFE_OVER);
+
+  if (age < (def.minAge ?? 0)) return refuse("You're too young.");
+  if (age > (def.maxAge ?? DEFAULT_MAX_AGE)) return refuse("You're too old.");
   if (def.condition && !def.condition(ctx)) {
-    return { ok: false, reason: "You can't do that right now." };
+    return refuse("You can't do that right now.");
   }
 
   // `interactionUse` stores the AGE of the last use, not a year or a timestamp.
   const cooldown = def.cooldownYears ?? 0;
   const lastUsedAge = ctx.state.interactionUse[def.id];
   if (cooldown > 0 && typeof lastUsedAge === 'number' && age - lastUsedAge < cooldown) {
-    return { ok: false, reason: 'Too soon.' };
+    return refuse('Too soon.');
   }
 
-  if (c.money < costOf(ctx, def)) return { ok: false, reason: "You can't afford it." };
+  const cost = costOf(ctx, def);
+  if (c.money < cost) return refuse("You can't afford it.", cost);
 
-  return { ok: true };
+  // Rewound like every other exit; the spent cursor goes back as data instead.
+  const spent = ctx.state.rngState;
+  ctx.state.rngState = cursor;
+  return spent === cursor ? { ok: true, cost } : { ok: true, cost, rngState: spent };
 }
 
 /**
@@ -98,6 +144,9 @@ export function canUse(ctx: Ctx, def: InteractionDef): { ok: boolean; reason?: s
  * Rows that fail only on cost or cooldown are deliberately kept so the sheet can
  * render them greyed out with the reason from `canUse` — call `canUse` per row
  * before enabling it, since this list is wider than what `runInteraction` allows.
+ * That is free however often the sheet repaints and whatever the answer is:
+ * `canUse` rewinds the cursor before it returns, for a row that passes as well
+ * as one that is blocked.
  */
 export function availableInteractions(
   state: GameState,
@@ -122,9 +171,13 @@ export function availableInteractions(
 }
 
 /**
- * Runs one interaction: resolves `targetId` into `ctx.target`, charges the cost,
- * applies the resolved effects, records the cooldown in `interactionUse` and
- * appends the entries to the current year log. Returns null when unavailable.
+ * Runs one interaction: resolves `targetId` into `ctx.target`, charges the price
+ * `canUse` validated, applies the resolved effects, records the cooldown in
+ * `interactionUse` and appends the entries to the current year log. Returns null
+ * when unavailable.
+ *
+ * A refusal costs the player nothing at all: no money, no cooldown stamp, no log
+ * line — and no draw, since `canUse` rewinds the cursor whatever it answers.
  */
 export function runInteraction(
   state: GameState,
@@ -138,16 +191,33 @@ export function runInteraction(
 
   const c = state.character;
   const rng = createRng(state);
-  const target: Person | undefined = targetId !== undefined ? state.people[targetId] : undefined;
+  /* `personById`, never `state.people[targetId]`: the id is whatever a UI row
+     carried (and on a load, whatever JSON held), so `__proto__` or `constructor`
+     would otherwise resolve to an inherited member. That object is truthy, and a
+     `{who:'target'}` effect cannot recover — it looks the canonical person up by
+     `target.id`, which such an object does not have, and falls back to the
+     polluting object itself. An id nobody owns is simply no target. */
+  const target: Person | undefined =
+    targetId !== undefined ? personById(state.people, targetId) : undefined;
   const ctx: Ctx = { state, c, rng, reg, target };
 
   const gate = canUse(ctx, def);
   if (!gate.ok) {
     return { text: gate.reason ?? "You can't do that.", icon: BLOCKED_ICON, entries: [] };
   }
+  /* The gate is a pure read for every other caller, so it left the cursor where
+     it found it. This is the one caller entitled to what `condition` and `cost`
+     spent — it is about to charge the player the price those draws priced — so
+     it adopts the cursor they left rather than re-running either. */
+  if (gate.rngState !== undefined) state.rngState = gate.rngState;
 
-  const cost = costOf(ctx, def);
-  if (cost > 0) c.money = Math.max(0, Math.round(c.money - cost));
+  /* Charge the price the gate validated — never re-run `def.cost`. A priced
+     function holds the live cursor, so a second call would roll a different
+     number: the player would be billed an amount no affordability check ever
+     saw (and the clamp below would quietly empty the wallet to $0 when that
+     number came in over the balance), on top of spending a second draw. */
+  const cost = gate.cost ?? 0;
+  if (cost > 0) c.money = clampMoney(c.money - cost, c.money);
 
   const result = def.resolve(ctx);
   const icon = result.icon ?? def.icon;
@@ -183,8 +253,13 @@ export function commitCrime(
   const ctx: Ctx = { state, c, rng, reg };
 
   if (rng.chance(def.successChance(ctx))) {
-    const payout = rng.int(def.payout[0], def.payout[1]);
-    c.money = Math.max(0, Math.round(c.money + payout));
+    /* `rng.int` hands back NaN for a NaN bound (the draw is spent either way, so
+       the sequence is unaffected), and a NaN payout used to be written straight
+       into the balance, where nothing could ever remove it. An unreadable score
+       is worth nothing rather than everything. */
+    const rolled = rng.int(def.payout[0], def.payout[1]);
+    const payout = Number.isFinite(rolled) ? rolled : 0;
+    c.money = clampMoney(c.money + payout, c.money);
     const text = `You got away with ${def.label}. +${fmtMoney(payout)}`;
     const entries: LogEntry[] = [{ icon: def.icon, kind: 'legal', text }];
     currentYearLog(state).entries.push(...entries);

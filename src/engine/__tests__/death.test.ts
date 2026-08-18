@@ -536,6 +536,11 @@ describe('startLegacy', () => {
     const gone = addChild(state, 'Gone Byron', 20, { alive: false });
 
     expect(() => startLegacy(state, reg, 'p99')).toThrow('unknown person p99');
+    /* `people[id]` would answer these with `Object.prototype` or `Object`
+       itself; the heir lookup must read them as nobody, like any other id. */
+    expect(() => startLegacy(state, reg, '__proto__')).toThrow('unknown person __proto__');
+    expect(() => startLegacy(state, reg, 'constructor')).toThrow('unknown person constructor');
+    expect(() => startLegacy(state, reg, 'toString')).toThrow('unknown person toString');
     expect(() => startLegacy(state, reg, friend.id)).toThrow('is not a child');
     expect(() => startLegacy(state, reg, gone.id)).toThrow('is not alive');
     expect(() => startLegacy(state, reg, children[0].id)).not.toThrow();

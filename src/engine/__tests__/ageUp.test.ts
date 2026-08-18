@@ -870,6 +870,103 @@ describe('resolveChoice on a card the current content cannot resolve', () => {
     expect(JSON.stringify(play())).toBe(JSON.stringify(play()));
   });
 
+  it('discards a card that offers no choices at all instead of bricking the save', () => {
+    /* A zero-choice card cannot be minted — the events phase queues one only
+       once a label has passed its condition — but it can arrive from a save,
+       which `loadGame` does not validate below `state.character`. Every index is
+       out of range on it, so the caller-mistake throw left no legal move at all:
+       `ageUp` takes no phase but `alive`, and the retry threw the same way. */
+    const reg = eventRegistry(forkEvent());
+    const state = atFork(72, []);
+    const ageBefore = state.character.age;
+    const cursorBefore = state.rngState;
+
+    resolveChoice(state, reg, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toEqual([]);
+    expect(lastYear(state).entries.slice(-1)).toEqual([
+      { icon: '🍴', kind: 'info', text: LOST_LINE },
+    ]);
+    // Draw-free, like every other discard.
+    expect(state.rngState).toBe(cursorBefore);
+    expect(state.character.stats.happiness).toBe(50);
+
+    // The point of the fix: the life is playable again.
+    ageUp(state, reg);
+    expect(state.character.age).toBe(ageBefore + 1);
+  });
+
+  it('discards a zero-choice card whatever index is passed, and whatever the registry knows', () => {
+    // Both halves of the repro: the event still defined, and long since renamed.
+    const cases = [
+      { reg: eventRegistry(forkEvent()), eventId: 'fork' },
+      { reg: emptyRegistry(), eventId: 'gone' },
+    ];
+    for (const { reg, eventId } of cases) {
+      for (const index of [0, 1, 7, -1]) {
+        const state = atFork(73, []);
+        state.pending[0].eventId = eventId;
+        const cursorBefore = state.rngState;
+
+        expect(() => resolveChoice(state, reg, index)).not.toThrow();
+
+        expect(state.phase).toBe('alive');
+        expect(state.pending).toEqual([]);
+        expect(texts(lastYear(state).entries).slice(-1)).toEqual([LOST_LINE]);
+        expect(state.rngState).toBe(cursorBefore);
+      }
+    }
+  });
+
+  it('drops only the zero-choice card, leaving the queue behind it answerable', () => {
+    const state = atFork(74, []);
+    state.pending.push({
+      eventId: 'fork',
+      text: 'A fork in the road.',
+      icon: '🍴',
+      choices: [{ label: 'Go right' }],
+    });
+    const reg = eventRegistry(forkEvent());
+
+    resolveChoice(state, reg, 0);
+
+    expect(state.phase).toBe('awaitingChoice');
+    expect(state.pending).toHaveLength(1);
+    expect(state.character.stats.happiness).toBe(50);
+
+    resolveChoice(state, reg, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(state.character.stats.happiness).toBe(55);
+  });
+
+  it('replays a zero-choice discard identically from the same seed', () => {
+    const reg = eventRegistry(forkEvent());
+
+    const play = (): GameState => {
+      const state = atFork(75, []);
+      resolveChoice(state, reg, 0);
+      ageUp(state, reg);
+      return state;
+    };
+
+    expect(JSON.stringify(play())).toBe(JSON.stringify(play()));
+  });
+
+  it('still reports a bad index on a card that does offer options', () => {
+    // The discard covers the shape with no legal index; it does not swallow a
+    // caller bug on a card where index 0 was there to be passed.
+    const state = atFork(76);
+
+    expect(() => resolveChoice(state, eventRegistry(forkEvent()), 2)).toThrow(
+      'no choice at index 2'
+    );
+    expect(state.phase).toBe('awaitingChoice');
+    expect(state.pending).toHaveLength(1);
+    expect(texts(lastYear(state).entries)).not.toContain(LOST_LINE);
+  });
+
   it('drops one card per call and drains a queue of them', () => {
     const state = atFork(53);
     state.pending.push({

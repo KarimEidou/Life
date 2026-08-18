@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveChoice } from '@/engine/ageUp';
+import { ageUp, resolveChoice } from '@/engine/ageUp';
 import { eventsPhase } from '@/engine/phases/events';
 import { buildRegistry } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
 import { createLife } from '@/engine/state';
-import type { ContentPack, ContentRegistry, Ctx, EventDef, GameState, Rng } from '@/types';
+import type {
+  ContentPack,
+  ContentRegistry,
+  Ctx,
+  EventDef,
+  GameState,
+  LogEntry,
+  Rng,
+} from '@/types';
 
 const EMPTY = buildRegistry([]);
 
@@ -51,6 +59,15 @@ function scriptRng(chances: readonly boolean[]): Rng {
   };
 }
 
+/**
+ * `chance` scripted, `weighted` the engine's real one. `scriptRng`'s stand-in
+ * just takes the heaviest item and never throws, so it cannot show what the
+ * live `rng.weighted` does with a pool it refuses to draw from.
+ */
+function liveWeightedRng(state: GameState, chances: readonly boolean[]): Rng {
+  return { ...scriptRng(chances), weighted: createRng(state).weighted };
+}
+
 function ctxOf(state: GameState, reg: ContentRegistry, rng?: Rng): Ctx {
   return { state, c: state.character, rng: rng ?? createRng(state), reg };
 }
@@ -87,6 +104,43 @@ describe('eventsPhase eligibility', () => {
     ]);
 
     expect(eventsPhase(ctxOf(state, reg, scriptRng([true, true])))).toEqual([]);
+  });
+
+  it('skips an event whose weight is not finite instead of throwing on the draw', () => {
+    /* `Infinity > 0` is true, so a bare `> 0` gate lets the def into the pool;
+       `rng.weighted` then rejects it as non-finite, finds no positive weight and
+       throws. The gate has to mirror that predicate, like `canRollOutcome`. */
+    const state = newLife(22);
+    const reg = registryOf([event({ id: 'endless', weight: Number.POSITIVE_INFINITY })]);
+
+    let entries: LogEntry[] = [{ icon: '!', kind: 'info', text: 'unset' }];
+    expect(() => {
+      entries = eventsPhase(ctxOf(state, reg, liveWeightedRng(state, [true, true])));
+    }).not.toThrow();
+    expect(entries).toEqual([]);
+  });
+
+  it('spends no randomness on a year whose only event has a non-finite weight', () => {
+    // The empty-pool early return, which is what keeps the year draw-free.
+    const state = newLife(23);
+    const reg = registryOf([event({ id: 'endless', weight: Number.POSITIVE_INFINITY })]);
+    const before = state.rngState;
+
+    expect(eventsPhase(ctxOf(state, reg))).toEqual([]);
+    expect(state.rngState).toBe(before);
+  });
+
+  it('draws the finite sibling and never the non-finite one, on either draw', () => {
+    const state = newLife(24);
+    const reg = registryOf([
+      // `scriptRng` takes the heaviest, so an unfiltered Infinity would win here.
+      event({ id: 'endless', weight: Number.POSITIVE_INFINITY, text: 'Never.' }),
+      event({ id: 'ordinary', weight: 1, text: 'Ordinary.' }),
+    ]);
+
+    const entries = eventsPhase(ctxOf(state, reg, scriptRng([true, true])));
+
+    expect(entries.map((e) => e.text)).toEqual(['Ordinary.']);
   });
 
   it('hands the condition a context pointing at the live character', () => {
@@ -345,6 +399,23 @@ describe('eventsPhase death protocol', () => {
     expect(state.character.money).toBe(0);
     // The obituary belongs to `killCharacter`, which `ageUp` calls afterwards.
     expect(state.death).toBeUndefined();
+  });
+});
+
+describe('eventsPhase inside ageUp', () => {
+  it('does not strand the year half-advanced on a non-finite event weight', () => {
+    /* The throw escaped `ageUp` after `agingPhase` had already bumped age/year
+       and pushed a fresh YearLog, leaving a state with no legal move — the same
+       unrecoverable strand `resolveChoice` was hardened against. */
+    const reg = registryOf([event({ id: 'endless', weight: Number.POSITIVE_INFINITY })]);
+    const state = createLife(reg, { seed: 1, firstName: 'Ada', lastName: 'Moreno' });
+
+    expect(() => {
+      for (let year = 0; year < 20; year += 1) ageUp(state, reg);
+    }).not.toThrow();
+    expect(state.character.age).toBe(20);
+    expect(state.phase).toBe('alive');
+    expect(state.log).toHaveLength(21);
   });
 });
 

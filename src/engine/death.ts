@@ -3,7 +3,7 @@
  */
 
 import { currentYearLog } from '@/engine/ageUp';
-import { clampStat } from '@/engine/effects';
+import { clampStat, personById } from '@/engine/effects';
 import { fmtMoneyCompact } from '@/engine/format';
 import { createRng } from '@/engine/rng';
 import { addPerson, pronounsFor } from '@/engine/state';
@@ -147,7 +147,10 @@ export function startLegacy(
   reg: ContentRegistry,
   childId: string
 ): GameState {
-  const heir = state.people[childId];
+  /* `personById`, never `state.people[childId]`: the id comes from a UI pick
+     and reads back out of JSON, so an inherited member like `__proto__` must
+     be nobody here too — the same invariant, kept in one place. */
+  const heir = personById(state.people, childId);
   if (!heir) throw new Error(`startLegacy: unknown person ${childId}`);
   if (heir.kind !== 'child') throw new Error(`startLegacy: ${childId} is not a child`);
   if (!heir.alive) throw new Error(`startLegacy: ${childId} is not alive`);

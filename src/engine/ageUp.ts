@@ -126,11 +126,11 @@ function canRollOutcome(choice: EventChoice): boolean {
  * whatever content the running build ships. An update that renames or removes
  * an event, drops its branches, retires one label, or leaves the chosen option
  * with nothing rollable (see `canRollOutcome`) leaves a queued card no outcome
- * can be produced for. Refusing it would strand the life for good — `ageUp`
- * accepts no phase but `alive`, so a save parked on `awaitingChoice` would have
- * no legal move left. The card is discarded with a neutral line instead. No
- * randomness is consumed, so the surrounding sequence is untouched and the
- * discard replays identically.
+ * can be produced for — as does a stored card that offers no labels at all.
+ * Refusing it would strand the life for good — `ageUp` accepts no phase but
+ * `alive`, so a save parked on `awaitingChoice` would have no legal move left.
+ * The card is discarded with a neutral line instead. No randomness is consumed,
+ * so the surrounding sequence is untouched and the discard replays identically.
  */
 function discardPending(state: GameState, pending: PendingEvent): void {
   currentYearLog(state).entries.push({
@@ -147,10 +147,11 @@ function discardPending(state: GameState, pending: PendingEvent): void {
  * outcome, applies its effects, appends the entries and pops the queue. The
  * phase returns to `alive` once the queue empties and the character lives.
  *
- * Throws only on caller mistakes (wrong phase, empty queue, out-of-range
- * index), which leave the queue untouched so the call can be retried. A card
- * the current content can no longer describe is discarded instead — see
- * `discardPending`.
+ * Throws only on caller mistakes (wrong phase, empty queue, an out-of-range
+ * index into a card that does offer options), which leave the queue untouched
+ * so the call can be retried. A card the current content can no longer
+ * describe — including one that offers nothing to pick — is discarded instead,
+ * see `discardPending`.
  */
 export function resolveChoice(
   state: GameState,
@@ -164,9 +165,24 @@ export function resolveChoice(
   if (!pending) {
     throw new Error('resolveChoice with an empty pending queue');
   }
+  /* A card offering nothing has no index that is not out of range, so the throw
+     below would leave the life no legal move at all: `ageUp` takes no phase but
+     `alive` and every retry throws the same way. The events phase never mints
+     such a card — it queues one only once a label has passed its condition — so
+     it can only arrive from a save, which the loader does not validate this
+     deep. That is the same drift the paths below handle, and it gets the same
+     draw-free discard. Widened because a stored card can also carry no list at
+     all. */
+  const offered: readonly { label: string }[] | undefined = pending.choices;
+  if (!offered || offered.length === 0) {
+    discardPending(state, pending);
+    return;
+  }
   /* Checked before the registry lookup so a caller passing a bad index is always
-     reported as such, never quietly swallowed by the content-drift path below. */
-  const picked = pending.choices[choiceIndex];
+     reported as such, never quietly swallowed by the content-drift path below.
+     Only reachable once the card is known to offer something, so the index is
+     genuinely the caller's mistake. */
+  const picked = offered[choiceIndex];
   if (!picked) {
     throw new Error(`resolveChoice: no choice at index ${choiceIndex}`);
   }

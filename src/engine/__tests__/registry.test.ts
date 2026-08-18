@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
+import { careerPhase } from '@/engine/phases/career';
+import { educationPhase } from '@/engine/phases/education';
 import { buildRegistry, emptyPack, validateRegistry } from '@/engine/registry';
+import { createRng } from '@/engine/rng';
+import { createLife } from '@/engine/state';
 import type {
   AchievementDef,
   AssetDef,
   ContentPack,
+  ContentRegistry,
   CountryDef,
   CrimeDef,
+  Ctx,
+  EventChoice,
   EventDef,
   IllnessDef,
   InteractionDef,
@@ -122,6 +129,39 @@ function pack(id: string, parts: Omit<ContentPack, 'id'>): ContentPack {
   return { id, ...parts };
 }
 
+/** Every id map the registry hands out, under the name it is published as. */
+function indexes(reg: ContentRegistry): Record<string, Record<string, unknown>> {
+  return {
+    eventsById: reg.eventsById,
+    interactionsById: reg.interactionsById,
+    jobsById: reg.jobsById,
+    assetsById: reg.assetsById,
+    illnessesById: reg.illnessesById,
+    schoolsById: reg.schoolsById,
+    countriesById: reg.countriesById,
+    crimesById: reg.crimesById,
+    achievementsById: reg.achievementsById,
+    namePools: reg.namePools,
+  };
+}
+
+/** Keys every plain object literal answers even when nothing was ever stored. */
+const INHERITED_KEYS = [
+  'toString',
+  'constructor',
+  'valueOf',
+  'hasOwnProperty',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  '__proto__',
+] as const;
+
+/** A Ctx over a fresh life, for the phases that read the registry's indexes. */
+function ctxFor(reg: ContentRegistry, seed = 1): Ctx {
+  const state = createLife(reg, { seed });
+  return { state, c: state.character, rng: createRng(state), reg };
+}
+
 describe('buildRegistry', () => {
   it('builds an empty, valid registry from no packs', () => {
     const reg = buildRegistry([]);
@@ -196,6 +236,92 @@ describe('buildRegistry', () => {
     const reg = buildRegistry([pack('one', { events: [event({ id: 'constructor' })] })]);
     expect(reg.eventsById.constructor).toBe(reg.events[0]);
     expect(validateRegistry(reg)).toEqual([]);
+  });
+});
+
+/**
+ * Every `find*` helper in the engine reads one of these maps through a widened
+ * `Record<string, T | undefined>` so a missing id comes back undefined. That is
+ * only true of a map that inherits nothing: a plain object literal answers
+ * `toString`, `constructor` and friends with a member of `Object.prototype`,
+ * which is truthy and sails straight past every missing-def guard downstream.
+ */
+describe('buildRegistry: inherited members are not content', () => {
+  it('answers undefined for every inherited key, in every index', () => {
+    const registries: Record<string, ContentRegistry> = {
+      empty: buildRegistry([]),
+      populated: buildRegistry([
+        pack('all', {
+          events: [event()],
+          jobs: [job()],
+          schools: ladder(),
+          countries: [country()],
+          illnesses: [illness()],
+          assets: [asset()],
+          crimes: [crime()],
+          achievements: [achievement()],
+          interactions: [interaction()],
+          namePools: [pool()],
+        }),
+      ]),
+    };
+
+    for (const [shape, reg] of Object.entries(registries)) {
+      for (const [name, map] of Object.entries(indexes(reg))) {
+        for (const key of INHERITED_KEYS) {
+          expect(map[key], `${shape} registry: ${name}.${key}`).toBeUndefined();
+        }
+      }
+    }
+  });
+
+  it('leaves a job whose id is an inherited key looking unemployed to the phase', () => {
+    // `toString` used to resolve to Function.prototype.toString, whose
+    // `raisePct` is undefined: the raise turned the salary into NaN for good.
+    const ctx = ctxFor(buildRegistry([]));
+    const c = ctx.c;
+    c.age = 30;
+    c.money = 50000;
+    c.job = {
+      jobId: 'toString',
+      title: 'Ghost',
+      salary: 40000,
+      years: 2,
+      performance: 60,
+      workHard: false,
+    };
+
+    careerPhase(ctx);
+
+    expect(c.job?.salary).toBe(40000);
+    expect(Number.isFinite(c.job?.salary ?? Number.NaN)).toBe(true);
+  });
+
+  it('empties a desk whose school id is an inherited key', () => {
+    // The education self-heal is guarded on `findSchool` missing; `valueOf`
+    // used to satisfy it, stranding the character in a school forever.
+    const ctx = ctxFor(buildRegistry([]));
+    const ed = ctx.c.education;
+    ctx.c.age = 10;
+    ed.level = 'primary';
+    ed.enrolledIn = 'valueOf';
+    ed.year = 0;
+    ed.gpa = 3;
+
+    educationPhase(ctx);
+
+    expect(ed.enrolledIn).toBeUndefined();
+    expect(ed.year).toBe(0);
+  });
+
+  it('treats a requested country id that is an inherited key as unknown', () => {
+    // `constructor` used to resolve to the Object constructor, whose `.id` is
+    // undefined — and that undefined became the character's country.
+    const state = createLife(buildRegistry([]), { seed: 1, countryId: 'constructor' });
+
+    expect(state.character.countryId).toBe('us');
+    expect(state.character.flags.countryLabel).toBe('us');
+    expect(state.log[0]?.entries[0]?.text).not.toContain('undefined');
   });
 });
 
@@ -294,6 +420,143 @@ describe('validateRegistry', () => {
     expect(problems).toContain('event "empty-choice" choice "Shrug" has no outcomes');
     expect(problems).toContain('event "zero-outcome" choice "Go" outcome 0 has weight 0');
     expect(problems).toContain('event "twin-labels" has duplicate choice label "Go"');
+  });
+
+  it('reports a non-finite weight on an event and on an outcome', () => {
+    /* `Infinity > 0` is true, so a bare `> 0` gate validated both of these
+       clean while `rng.weighted` refuses them at draw time: the event throws
+       out of `eventsPhase`, and the outcome makes every deal of the card end in
+       `discardPending`. `weight>0` is this lint's own promise, and the
+       predicate it has to promise is `rng.weighted`'s: finite and positive. */
+    const reg = buildRegistry([
+      pack('events', {
+        events: [
+          event({ id: 'endless', weight: Number.POSITIVE_INFINITY }),
+          event({ id: 'nan-weight', weight: Number.NaN }),
+          event({ id: 'backwards-infinite', weight: Number.NEGATIVE_INFINITY }),
+          event({
+            id: 'endless-outcome',
+            choices: [
+              {
+                label: 'Go',
+                outcomes: [
+                  { weight: Number.POSITIVE_INFINITY, text: 'Nothing.', effects: [] },
+                  { weight: Number.NaN, text: 'Also nothing.', effects: [] },
+                ],
+              },
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('event "endless" has weight Infinity');
+    expect(problems).toContain('event "nan-weight" has weight NaN');
+    expect(problems).toContain('event "backwards-infinite" has weight -Infinity');
+    expect(problems).toContain('event "endless-outcome" choice "Go" outcome 0 has weight Infinity');
+    expect(problems).toContain('event "endless-outcome" choice "Go" outcome 1 has weight NaN');
+  });
+
+  it('leaves ordinary finite weights alone', () => {
+    // The predicate was widened, not tightened: valid content still validates clean.
+    const reg = buildRegistry([
+      pack('events', {
+        events: [
+          event({ id: 'tiny', weight: 0.001 }),
+          event({
+            id: 'branching',
+            weight: 1000,
+            choices: [{ label: 'Go', outcomes: [{ weight: 0.5, text: 'Fine.', effects: [] }] }],
+          }),
+        ],
+      }),
+    ]);
+
+    expect(validateRegistry(reg)).toEqual([]);
+  });
+
+  it('reports a choice with no outcome list at all instead of throwing on it', () => {
+    /* The shape `ageUp`'s `canRollOutcome` widens for, and the one this lint is
+       documented to name. It reached the validator as an opaque TypeError. */
+    const choiceless = { label: 'Shrug' } as unknown as EventChoice;
+    const reg = buildRegistry([
+      pack('events', { events: [event({ id: 'listless', choices: [choiceless] })] }),
+    ]);
+
+    let problems: string[] = [];
+    expect(() => {
+      problems = validateRegistry(reg);
+    }).not.toThrow();
+    expect(problems).toContain('event "listless" choice "Shrug" has no outcomes');
+  });
+
+  it('reports an illness id no IllnessDef defines, from effects and from outcomes', () => {
+    const reg = buildRegistry([
+      pack('sick', {
+        illnesses: [illness({ id: 'flu' })],
+        events: [
+          event({ id: 'instant', effects: [{ kind: 'illness', add: 'dragonpox' }] }),
+          event({
+            id: 'branching',
+            choices: [
+              {
+                label: 'Drink it',
+                outcomes: [
+                  { weight: 1, text: 'Cured?', effects: [{ kind: 'illness', cure: 'ennui' }] },
+                  { weight: 1, text: 'Worse.', effects: [{ kind: 'illness', add: 'flu' }] },
+                ],
+              },
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('event "instant" adds unknown illness "dragonpox"');
+    expect(problems).toContain('event "branching" cures unknown illness "ennui"');
+    // The one illness the pack actually defines is not a problem.
+    expect(problems).not.toContain('event "branching" adds unknown illness "flu"');
+  });
+
+  it('names a dangling illness once however many outcomes repeat the typo', () => {
+    const reg = buildRegistry([
+      pack('sick', {
+        events: [
+          event({
+            id: 'thrice',
+            effects: [{ kind: 'illness', add: 'dragonpox' }],
+            choices: [
+              {
+                label: 'Again',
+                outcomes: [
+                  { weight: 1, text: 'A.', effects: [{ kind: 'illness', add: 'dragonpox' }] },
+                  { weight: 1, text: 'B.', effects: [{ kind: 'illness', add: 'dragonpox' }] },
+                ],
+              },
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems.filter((p) => p.includes('unknown illness "dragonpox"'))).toHaveLength(1);
+  });
+
+  it('reports a name pool keyed to a country nobody declared', () => {
+    const reg = buildRegistry([
+      pack('c', { countries: [country()], namePools: [pool(), pool({ countryId: 'atlantis' })] }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('name pool for unknown country "atlantis"');
+    expect(problems).not.toContain('name pool for unknown country "us"');
+
+    // Pools authored before any country pack exists are early, not wrong.
+    const countryless = buildRegistry([pack('c', { namePools: [pool({ countryId: 'atlantis' })] })]);
+    expect(validateRegistry(countryless)).toEqual([]);
   });
 
   it('reports reversed sentences, free assets and negative cooldowns', () => {

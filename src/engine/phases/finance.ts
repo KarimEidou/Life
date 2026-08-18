@@ -1,15 +1,16 @@
 /**
  * Finance phase plus every money action the player can take directly.
  *
- * The year is settled in one pass: income and tax, living costs, loan interest
- * and its automatic payment, then investment and asset movement. Only the net
+ * The year is settled in one pass, in this order: investments and assets move,
+ * then income and tax less living costs and upkeep are added to the cash on
+ * hand, then the loan instalments come out of what that leaves. Only the net
  * result reaches `character.money`, which never goes below zero — a shortfall is
  * covered out of the character's own investments, then by selling assets and,
  * failing both and with something left to seize, by bankruptcy.
  */
 
 import { currentYearLog } from '@/engine/ageUp';
-import { clampStat } from '@/engine/effects';
+import { clampMoney, clampStat } from '@/engine/effects';
 import { fmtMoney } from '@/engine/format';
 import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
@@ -67,7 +68,10 @@ const AUTO_APR = 0.09;
 const MORTGAGE_DOWN = 0.2;
 const AUTO_DOWN = 0.3;
 
-/** Borrowing cap: five years of salary, or this floor for anyone without one. */
+/**
+ * Borrowing cap: five years of salary, or this floor for anyone without one —
+ * and it is the *borrower's* ceiling, not one ticket's. See `takeLoan`.
+ */
 const LOAN_INCOME_MULT = 5;
 const LOAN_MIN_CAP = 10000;
 const MAX_PERSONAL_LOANS = 3;
@@ -77,7 +81,20 @@ const BORROW_MIN_AGE = 18;
 
 const PROPERTY_MIN_AGE = 18;
 const VEHICLE_MIN_AGE = 16;
+/**
+ * Happiness a purchase is worth, at most once a year — see `buyAsset` for why
+ * the year matters — recorded in this flag as the age it was last paid at.
+ */
 const PURCHASE_JOY = 8;
+const PURCHASE_JOY_FLAG = 'lastPurchaseJoyAge';
+/**
+ * Share of an asset's value a sale actually fetches, voluntary or forced: the
+ * rest is the spread the trade costs. Values only move in `revalueAssets`, which
+ * runs once a year inside `financePhase`, so without it buying and selling the
+ * same asset inside one year returned the exact cash it started with — see
+ * `sellAsset`.
+ */
+const RESALE_RATE = 0.9;
 
 const BANKRUPTCY_GRIEF = 20;
 
@@ -99,8 +116,27 @@ function numberFlag(value: boolean | number | string | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function money(n: number): number {
-  return Math.max(0, Math.round(n));
+/**
+ * Whole, non-negative dollars; `keep` is held when the amount is unreadable.
+ * The one money-write helper in this module, and `clampMoney` is the engine's —
+ * see it for why `Math.max(0, NaN)` had to stop being the shape of a balance.
+ */
+function money(n: number, keep = 0): number {
+  return clampMoney(n, keep);
+}
+
+/**
+ * A rate, multiplier or price read straight out of content, with `fallback` for
+ * anything that is not a readable number.
+ *
+ * Content packs author every one of these by hand, and a single NaN or Infinity
+ * among them used to reach `character.money` — a `costMult` of NaN made the
+ * year's living costs NaN, a salary of NaN made the year's gross NaN — with no
+ * way back. Each one is read exactly once, here, so a broken number costs the
+ * player nothing instead of the whole balance sheet.
+ */
+function contentNumber(n: number, fallback: number): number {
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /** Flags holding the monotonic id counters; see `mintLoanId`. */
@@ -164,6 +200,17 @@ function dependentChildren(state: GameState): number {
   ).length;
 }
 
+/**
+ * A student still living at home: the family keeps paying for them.
+ *
+ * Asked by `livingCosts`, the one place that has to know whether the character
+ * is really on their own. Enrolment alone is not enough: a student who has moved
+ * out pays their own way and is nobody's dependent.
+ */
+function dependentStudent(c: Character): boolean {
+  return c.flags.livesWithParents === true && c.education.enrolledIn !== undefined;
+}
+
 /** Yearly living costs; zero for a minor, for a student at home and behind bars. */
 function livingCosts(ctx: Ctx, costMult: number, entries: LogEntry[]): number {
   const state = ctx.state;
@@ -185,10 +232,7 @@ function livingCosts(ctx: Ctx, costMult: number, entries: LogEntry[]): number {
      survivors of the move-out above are all under `MOVE_OUT_AGE`, unmarried and
      without a home of their own, so no independent adult reaches this. Their own
      children are still their own to feed. */
-  const dependentStudent =
-    c.flags.livesWithParents === true && c.education.enrolledIn !== undefined;
-
-  let total = dependentStudent ? 0 : LIVING_COST * costMult;
+  let total = dependentStudent(c) ? 0 : LIVING_COST * costMult;
   if (c.flags.livesWithParents !== true && !home) total += RENT * costMult;
   total += dependentChildren(state) * CHILD_COST * costMult;
   return Math.round(total);
@@ -196,8 +240,9 @@ function livingCosts(ctx: Ctx, costMult: number, entries: LogEntry[]): number {
 
 /**
  * Charges every loan its year of interest, then takes the automatic instalment
- * out of the cash on hand. Returns what is left of that cash; cleared loans drop
- * off the character.
+ * out of the money the character has — the year's cash first and the investment
+ * pots after it. Returns what is left of that cash; cleared loans drop off the
+ * character.
  *
  * The instalment is the year's interest *plus* a share of the balance, so what
  * it repays is real: taking the share out of the already compounded balance
@@ -207,6 +252,36 @@ function livingCosts(ctx: Ctx, costMult: number, entries: LogEntry[]): number {
  * never be paid off and the payoff line was unreachable. The floor under the
  * repaid share keeps the tail from crawling once the balance is small; the
  * instalment is capped at the balance, so nobody overpays.
+ *
+ * Above all: **no balance ever ends a year larger than it started it.** The part
+ * of the year's interest the instalment could not cover is forborne rather than
+ * capitalised. Capitalising it compounds a debt against a character who has no
+ * way to pay it: anyone whose year nets zero or less, with no pot to reach into,
+ * arrives here with nothing whatever their income was, pays nothing, and watches
+ * the balance grow for ever. A graduate on a $25,000 wage turned $88,000 of
+ * tuition into $1.3M by 81, and a pensioner on $6,000 turned it into $380,000 —
+ * ordinary ways to play, and the HUD, the finance sheet and the death screen all
+ * quoted the result. Asking instead whether the character has *any* income at
+ * all only ever excused someone with literally nothing.
+ *
+ * Forbearance is the honest floor: the debt is still owed in full and it is
+ * still charged its interest, it simply cannot grow. Every payment that beats
+ * the interest still buys the balance down on exactly the schedule above — that
+ * is the only way `owed - pay` lands under the old principal — so a solvent
+ * borrower amortises to zero as before. It matters most to tuition, which
+ * survives the bankruptcy block at the bottom of `financePhase` on purpose and
+ * so has no other terminal state at all.
+ *
+ * **Solvent means net worth, not wallet balance.** An instalment cash cannot
+ * meet reaches into the investment pots first, exactly as a shortfall does in
+ * `drawOnInvestments` and for exactly the same reason: the pots are the
+ * character's, `withdrawInvestment` moves them back for free, and `netWorth`
+ * and the estate both count them as wealth. Without that the forbearance floor
+ * above cut the other way — a character with a million in savings and nothing
+ * in the current account paid *nothing*, for ever, on a balance that could no
+ * longer grow, and `depositInvestment` turned any loan into a free perpetual
+ * capital injection. Assets are not touched: a house is not spending money, and
+ * only a shortfall big enough to threaten the whole year forces a sale.
  */
 function settleLoans(ctx: Ctx, cash: number, entries: LogEntry[]): number {
   const c = ctx.state.character;
@@ -221,8 +296,11 @@ function settleLoans(ctx: Ctx, cash: number, entries: LogEntry[]): number {
       LOAN_MIN_PRINCIPAL_PAYMENT
     );
     const due = Math.min(interest + repaid, owed);
+    // The instalment is met out of the character's own money wherever it sits.
+    if (left < due) left = drawOnInvestments(ctx, left - due) + due;
     const pay = Math.max(0, Math.min(left, due));
-    loan.principal = owed - pay;
+    // Interest the payment did not reach is forborne, never capitalised. See above.
+    loan.principal = Math.min(loan.principal, owed - pay);
     left -= pay;
     if (loan.principal <= 0) {
       entries.push({ icon: '✅', kind: 'good', text: `You paid off your ${loan.kind} loan.` });
@@ -241,9 +319,9 @@ function growInvestments(ctx: Ctx): void {
   // Drawn every year whatever the balances are, so the sequence never depends on them.
   const indexReturn = ctx.rng.normal(INDEX_MEAN, INDEX_SD);
   const cryptoReturn = ctx.rng.normal(CRYPTO_MEAN, CRYPTO_SD);
-  inv.savings = money(inv.savings * (1 + SAVINGS_RATE));
-  inv.index = money(inv.index * (1 + indexReturn));
-  inv.crypto = money(inv.crypto * (1 + cryptoReturn));
+  inv.savings = money(inv.savings * (1 + SAVINGS_RATE), inv.savings);
+  inv.index = money(inv.index * (1 + indexReturn), inv.index);
+  inv.crypto = money(inv.crypto * (1 + cryptoReturn), inv.crypto);
 }
 
 /** Revalues every asset and returns the upkeep the year owes on them. */
@@ -253,10 +331,11 @@ function revalueAssets(ctx: Ctx): number {
   for (const asset of c.assets) {
     const def = findAsset(ctx.reg, asset.defId);
     /* Content owns the rate (roughly +3% a year on property, -10% on vehicles);
-       an asset whose def has gone missing simply holds its value. */
-    const rate = def ? def.apprPct : 0;
-    asset.value = money(asset.value * (1 + rate));
-    upkeep += (def ? def.upkeepPct : DEFAULT_UPKEEP) * asset.value;
+       an asset whose def has gone missing — or one whose rate is not a readable
+       number — simply holds its value. */
+    const rate = def ? contentNumber(def.apprPct, 0) : 0;
+    asset.value = money(asset.value * (1 + rate), asset.value);
+    upkeep += contentNumber(def ? def.upkeepPct : DEFAULT_UPKEEP, DEFAULT_UPKEEP) * asset.value;
   }
   return Math.round(upkeep);
 }
@@ -293,13 +372,19 @@ function drawOnInvestments(ctx: Ctx, cash: number): number {
   return left;
 }
 
+/** What a sale hands over: the value less the spread every trade costs. */
+function resaleValue(asset: OwnedAsset): number {
+  return money(asset.value * RESALE_RATE);
+}
+
 /**
  * Sells assets cheapest-first until the books balance again.
  *
- * A forced sale settles the same way a voluntary one does — see `sellAsset` —
- * because a loan must never outlive the collateral it is secured against: the
- * `assetId` would point at an `OwnedAsset` that no longer exists and the debt
- * would go on compounding and taking its yearly share of cash for good.
+ * A forced sale settles the same way a voluntary one does — see `sellAsset` — at
+ * the same `RESALE_RATE`, and because a loan must never outlive the collateral
+ * it is secured against: the `assetId` would point at an `OwnedAsset` that no
+ * longer exists and the debt would go on taking its yearly share of cash for
+ * good.
  */
 function forceSales(ctx: Ctx, cash: number, entries: LogEntry[]): number {
   const c = ctx.state.character;
@@ -308,7 +393,7 @@ function forceSales(ctx: Ctx, cash: number, entries: LogEntry[]): number {
 
   for (const asset of cheapestFirst) {
     if (left >= 0) break;
-    left += asset.value;
+    left += resaleValue(asset);
     c.assets = c.assets.filter((held) => held.id !== asset.id);
     /* The secured loan is paid out of what the books can spare and goes with the
        asset either way; a pot still in the red covers none of it and the balance
@@ -334,22 +419,33 @@ export function financePhase(ctx: Ctx): LogEntry[] {
   const entries: LogEntry[] = [];
 
   const country = findCountry(ctx.reg, c.countryId);
-  const costMult = country ? country.costMult : 1;
-  const taxMult = country ? country.taxMult : 1;
+  const costMult = country ? contentNumber(country.costMult, 1) : 1;
+  const taxMult = country ? contentNumber(country.taxMult, 1) : 1;
 
   // A prisoner has no job (the sentence took it) but a pension keeps paying.
-  const gross = (c.job ? c.job.salary : 0) + numberFlag(c.flags.pensionSalary);
+  const salary = c.job ? contentNumber(c.job.salary, 0) : 0;
+  const gross = salary + numberFlag(c.flags.pensionSalary);
   const tax = incomeTax(gross, taxMult);
   const expenses = livingCosts(ctx, costMult, entries);
 
-  let cash = settleLoans(ctx, c.money, entries);
   growInvestments(ctx);
   const upkeep = revalueAssets(ctx);
 
-  cash += gross - tax - expenses - upkeep;
+  /* The whole year lands before any of it is settled. Opening with `settleLoans`
+     instead charged the instalment against the cash the year *started* with, and
+     `financePhase` ends every short year at zero — so a borrower who earned the
+     money to service the debt still paid nothing, and only paid at all in the
+     second year and after. `money(c.money)` is also the recovery path for a
+     balance a save or an old content typo left unreadable: it heals to 0 here
+     rather than poisoning the loans below. Neither `settleLoans` nor
+     `drawOnInvestments` consumes randomness, so the year's draw sequence is
+     exactly what it was — `growInvestments` still takes the same two. */
+  let cash = money(c.money) + gross - tax - expenses - upkeep;
 
   // Own money first: the pots are the character's, and moving them costs nothing.
   if (cash < 0) cash = drawOnInvestments(ctx, cash);
+  // The instalment reaches those same pots on its own; see `settleLoans`.
+  cash = settleLoans(ctx, cash, entries);
   if (cash < 0) cash = forceSales(ctx, cash, entries);
   if (cash < 0) {
     /* Bankruptcy needs something to be bankrupt over. Without a debt to discharge
@@ -365,16 +461,26 @@ export function financePhase(ctx: Ctx): LogEntry[] {
        loan off — tuition financed itself, and no degree was ever paid for. */
     const seizable =
       c.loans.some((loan) => loan.kind !== 'student') || c.assets.length > 0;
-    /* Bankruptcy is also the transition, not the condition: someone with nothing
-       left stays short of money every year after, and the estate was already
-       seized, so a repeat year only writes the shortfall off. Reporting it again
-       would fill a whole life with the same line. */
-    if (seizable && c.flags.bankrupt !== true) {
+    if (seizable) {
       c.loans = c.loans.filter((loan) => loan.kind === 'student');
       c.assets = [];
-      c.stats.happiness = clampStat(c.stats.happiness - BANKRUPTCY_GRIEF);
-      c.flags.bankrupt = true;
-      entries.push({ icon: '🏦', kind: 'bad', text: 'You went bankrupt.' });
+      /* The flag governs the notice and the grief, not the write-off. Bankruptcy
+         is the transition, not the condition: someone with nothing left stays
+         short of money every year after, and reporting it again would fill a
+         whole life with the same line and the same grief. But `seizable` is
+         already exactly 'there is something to wipe', so a repeat year with
+         nothing left is silent and free on its own — while gating the discharge
+         on the flag as well locked a character out of the only terminal state
+         non-student debt has. Borrowing again after a collapse, and never having
+         another year that ends in the black, left a balance that could not
+         shrink, could not grow and could not be written off, dragging `netWorth`
+         down on the HUD, the finance sheet and the epitaph for the rest of the
+         life. */
+      if (c.flags.bankrupt !== true) {
+        c.stats.happiness = clampStat(c.stats.happiness - BANKRUPTCY_GRIEF);
+        c.flags.bankrupt = true;
+        entries.push({ icon: '🏦', kind: 'bad', text: 'You went bankrupt.' });
+      }
     }
     cash = 0;
   } else if (c.flags.bankrupt === true && cash > 0) {
@@ -383,7 +489,7 @@ export function financePhase(ctx: Ctx): LogEntry[] {
   }
 
   // Deliberately silent about the balance itself: the HUD already shows it.
-  c.money = money(cash);
+  c.money = money(cash, c.money);
   return entries;
 }
 
@@ -432,7 +538,23 @@ export function withdrawInvestment(
   return true;
 }
 
-/** Borrows against income and existing debt, adding a personal loan on success. */
+/**
+ * Borrows against income and existing debt, adding a personal loan on success.
+ *
+ * The cap is the borrower's total, not the size of one ticket. Comparing it
+ * against the amount being asked for and nothing else left `MAX_PERSONAL_LOANS`
+ * as the only real brake, so the true ceiling was *fifteen* years of salary:
+ * three maximal loans in a single year, none of which the header ever promised.
+ * What is already owed is subtracted first and the headroom is what the bank
+ * will lend.
+ *
+ * Secured principal counts: a mortgage or a car loan is money this same bank is
+ * already owed, and `buyAsset` opens those without asking anything at all, so
+ * leaving them out would reopen the same hole through the showroom. Tuition does
+ * not: the engine issues it to a student who never chose the amount and has no
+ * income yet, and counting it would leave a graduate unable to borrow a dollar
+ * for years on the strength of a debt the engine handed them.
+ */
 export function takeLoan(
   state: GameState,
   reg: ContentRegistry,
@@ -456,9 +578,16 @@ export function takeLoan(
     return { ok: false, reason: 'Enter an amount to borrow.' };
   }
 
-  const cap = Math.max(LOAN_MIN_CAP, LOAN_INCOME_MULT * (c.job ? c.job.salary : 0));
-  if (wanted > cap) {
-    return { ok: false, reason: `The bank will only lend you ${fmtMoney(cap)}.` };
+  const salary = c.job ? contentNumber(c.job.salary, 0) : 0;
+  const cap = Math.max(LOAN_MIN_CAP, LOAN_INCOME_MULT * salary);
+  // Everything this bank is already owed, tuition aside; see the docstring.
+  const owed = c.loans.reduce(
+    (sum, loan) => (loan.kind === 'student' ? sum : sum + loan.principal),
+    0
+  );
+  const room = Math.max(0, cap - owed);
+  if (wanted > room) {
+    return { ok: false, reason: `The bank will only lend you ${fmtMoney(room)}.` };
   }
   if (c.loans.filter((loan) => loan.kind === 'personal').length >= MAX_PERSONAL_LOANS) {
     return { ok: false, reason: 'You already owe the bank enough.' };
@@ -517,11 +646,21 @@ export function buyAsset(
   const def = findAsset(reg, defId);
   if (!def) return { ok: false, reason: 'That is not for sale.' };
 
+  /* An unreadable price is not a price, so the def is not for sale — the same
+     answer a missing def gets, and the gate has to fail *closed*. `c.money <
+     down` is false for NaN, so an asset priced NaN was affordable to everyone,
+     always: it sold for nothing and booked an asset worth NaN, which then made
+     `netWorth`, the finance sheet and the epitaph NaN for the rest of the life.
+     `validateRegistry` names the def too, but a pack is playable unvalidated. */
+  const price = Math.round(def.price);
+  if (!(price >= 0) || !Number.isFinite(price)) {
+    return { ok: false, reason: 'That is not for sale.' };
+  }
+
   const property = def.type === 'property';
   const minAge = def.minAge ?? (property ? PROPERTY_MIN_AGE : VEHICLE_MIN_AGE);
   if (c.age < minAge) return { ok: false, reason: `You must be ${minAge} to buy that.` };
 
-  const price = Math.round(def.price);
   const down = withLoan ? Math.round(price * (property ? MORTGAGE_DOWN : AUTO_DOWN)) : price;
   if (c.money < down) {
     return {
@@ -549,7 +688,19 @@ export function buyAsset(
       assetId: asset.id,
     });
   }
-  c.stats.happiness = clampStat(c.stats.happiness + PURCHASE_JOY);
+  /* Rewarding once a year, not once a click. The joy had no cooldown and no
+     limit of any kind, while `sellAsset` refunded the whole value and asset
+     values only move in `revalueAssets` — so buying and selling the same car
+     twenty times inside one year was free, and took a character from 20
+     happiness to the cap. Happiness is a currency the rest of the engine
+     charges for (`WORK_HARD_HAPPINESS`, `STUDY_HAPPINESS_COST`, `RAISE_SNUB`,
+     `BANKRUPTCY_GRIEF`), holds a romance together in `relationshipsPhase` and
+     is quoted on the epitaph, so a free pump to 100 defeats all of it. The
+     spread on the sale charges for the churn; this charges for the joy. */
+  if (c.flags[PURCHASE_JOY_FLAG] !== c.age) {
+    c.stats.happiness = clampStat(c.stats.happiness + PURCHASE_JOY);
+    c.flags[PURCHASE_JOY_FLAG] = c.age;
+  }
   currentYearLog(state).entries.push({
     icon: def.icon,
     kind: 'money',
@@ -558,7 +709,17 @@ export function buyAsset(
   return { ok: true };
 }
 
-/** Sells an owned asset at its current value, settling any loan secured against it. */
+/**
+ * Sells an owned asset, settling any loan secured against it.
+ *
+ * The sale fetches `RESALE_RATE` of the asset's value rather than all of it.
+ * Refunding the whole value made a purchase perfectly reversible: values only
+ * move in `revalueAssets`, once a year, so a buy followed by a sale in the same
+ * year returned exactly the cash it started with — the deposit and the secured
+ * loan included — and `buyAsset` paid its happiness out every time. The spread
+ * is what a trade costs, so churning an asset now costs money the way it does
+ * in life.
+ */
 export function sellAsset(state: GameState, assetId: string): void {
   // A finished life is read-only; see `lifeIsOver`.
   if (lifeIsOver(state)) return;
@@ -568,7 +729,8 @@ export function sellAsset(state: GameState, assetId: string): void {
   if (!asset) return;
 
   c.assets = c.assets.filter((held) => held.id !== assetId);
-  let cash = c.money + asset.value;
+  const proceeds = resaleValue(asset);
+  let cash = c.money + proceeds;
   /* The secured loan is settled out of the proceeds; whatever the sale cannot
      cover goes with the asset rather than following the character. */
   const secured = c.loans.find((loan) => loan.assetId === assetId);
@@ -581,6 +743,6 @@ export function sellAsset(state: GameState, assetId: string): void {
   currentYearLog(state).entries.push({
     icon: '💵',
     kind: 'money',
-    text: `You sold your ${asset.label} for ${fmtMoney(asset.value)}.`,
+    text: `You sold your ${asset.label} for ${fmtMoney(proceeds)}.`,
   });
 }

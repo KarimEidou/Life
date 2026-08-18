@@ -2,14 +2,19 @@ import { describe, expect, it } from 'vitest';
 
 import type {
   Character,
+  ContentPack,
   ContentRegistry,
   Effect,
   EffectCtx,
+  EventDef,
   GameState,
+  JobDef,
   Person,
   RelKind,
+  SchoolDef,
 } from '@/types';
-import { applyEffects, clampStat } from '@/engine/effects';
+import { applyEffects, clampMoney, clampStat, personById } from '@/engine/effects';
+import { buildRegistry, validateRegistry } from '@/engine/registry';
 import { createRng, initialRngState } from '@/engine/rng';
 
 // Hand-rolled fixtures: `createLife` and `buildRegistry` belong to other modules.
@@ -123,6 +128,54 @@ describe('clampStat', () => {
   });
 });
 
+describe('clampMoney', () => {
+  it('rounds to whole dollars and never goes below zero', () => {
+    expect(clampMoney(250.4)).toBe(250);
+    expect(clampMoney(10.5)).toBe(11);
+    expect(clampMoney(-99999)).toBe(0);
+    expect(clampMoney(0)).toBe(0);
+  });
+
+  it('holds the balance rather than storing a number it cannot read', () => {
+    /* `Math.max(0, NaN)` is NaN, and that was the shape of every money write in
+       the engine: one bad content number and the balance was NaN with no way
+       back, because every later write is `NaN + delta`. */
+    expect(clampMoney(Number.NaN, 1000)).toBe(1000);
+    expect(clampMoney(Number.POSITIVE_INFINITY, 1000)).toBe(1000);
+    expect(clampMoney(Number.NEGATIVE_INFINITY, 1000)).toBe(1000);
+  });
+
+  it('heals a balance that is already unreadable', () => {
+    // The recovery path `clampStat` has always had: nothing stays poisoned.
+    expect(clampMoney(Number.NaN, Number.NaN)).toBe(0);
+    expect(clampMoney(Number.NaN)).toBe(0);
+    expect(clampMoney(500, Number.NaN)).toBe(500);
+  });
+});
+
+describe('personById', () => {
+  /* The one supported way to read `state.people` by an id that came from
+     content, a UI row or a loaded save — everything else in the engine goes
+     through it, so the prototype guard lives in exactly one place. */
+  it('answers only with own properties of the table', () => {
+    const friend = makePerson('1', 'friend');
+    const people: Record<string, Person> = { '1': friend };
+
+    expect(personById(people, '1')).toBe(friend);
+    expect(personById(people, 'p99')).toBeUndefined();
+    for (const magic of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+      expect(personById(people, magic)).toBeUndefined();
+    }
+  });
+
+  it('still finds a person whose own id shadows an inherited member', () => {
+    const odd = makePerson('toString', 'friend');
+    const people: Record<string, Person> = { toString: odd };
+
+    expect(personById(people, 'toString')).toBe(odd);
+  });
+});
+
 describe('applyEffects: stat', () => {
   it('adds the delta and clamps at both ends', () => {
     const state = makeState(makeCharacter({ stats: { health: 95, happiness: 4, smarts: 50, looks: 50 } }));
@@ -152,6 +205,39 @@ describe('applyEffects: money', () => {
 
     applyEffects(ctx, [{ kind: 'money', delta: 10.5 }]);
     expect(state.character.money).toBe(11);
+  });
+
+  it('ignores a delta that is not a number instead of destroying the balance', () => {
+    /* The sibling of the NaN guard `clampStat` has always had — and the one the
+       money path never did. `Math.max(0, NaN)` is NaN, so one such delta in a
+       pack poisoned the balance for the rest of the life: every later write was
+       `NaN + delta`, and it spread to `Loan.principal`, `netWorth`, the finance
+       sheet and the epitaph. */
+    const state = makeState(makeCharacter({ money: 1000 }));
+    const ctx = makeCtx(state);
+
+    for (const delta of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      applyEffects(ctx, [{ kind: 'money', delta }]);
+      expect(state.character.money).toBe(1000);
+    }
+
+    // And the balance still works afterwards: this is a skip, not a wound.
+    applyEffects(ctx, [{ kind: 'money', delta: 500 }]);
+    expect(state.character.money).toBe(1500);
+    expect(Number.isFinite(state.character.money)).toBe(true);
+  });
+
+  it('heals a balance that arrived unreadable, exactly as a stat does', () => {
+    const state = makeState(makeCharacter({ money: Number.NaN }));
+    const ctx = makeCtx(state);
+
+    applyEffects(ctx, [
+      { kind: 'money', delta: 250 },
+      { kind: 'stat', stat: 'health', delta: Number.NaN },
+    ]);
+
+    expect(state.character.money).toBe(0);
+    expect(state.character.stats.health).toBe(0);
   });
 });
 
@@ -237,6 +323,55 @@ describe('applyEffects: rel', () => {
     ]);
     expect(state.people['9']?.rel).toBe(100);
     expect(state.people['10']?.rel).toBe(0);
+  });
+
+  /* `who` widens to `string`, so an authoring typo naming an inherited member is
+     an ordinary content bug — and `state.people` always carries Object.prototype,
+     because that is what JSON.parse hands back on every load. */
+  it('treats an inherited member of state.people as nobody, without polluting it', () => {
+    const bystander: Record<string, unknown> = {};
+    const state = makeState(makeCharacter(), [makePerson('1', 'friend', { rel: 40 })]);
+    const ctx = makeCtx(state);
+    const cursor = state.rngState;
+
+    try {
+      const entries = applyEffects(ctx, [
+        { kind: 'rel', who: '__proto__', delta: 10 },
+        { kind: 'rel', who: 'toString', delta: 10 },
+        { kind: 'rel', who: 'constructor', delta: 10 },
+        { kind: 'rel', who: 'hasOwnProperty', delta: 10 },
+        { kind: 'rel', who: 'valueOf', delta: 10 },
+      ]);
+
+      expect(entries).toEqual([]);
+      // Skipped like any other unmatched `who`: no draw, no side effect anywhere.
+      expect(state.rngState).toBe(cursor);
+      expect(state.people['1']?.rel).toBe(40);
+      expect(Object.prototype.hasOwnProperty.call(Object.prototype, 'rel')).toBe(false);
+      expect(bystander.rel).toBeUndefined();
+      expect(({} as Record<string, unknown>).rel).toBeUndefined();
+      expect((Object.prototype.toString as unknown as Record<string, unknown>).rel).toBeUndefined();
+    } finally {
+      // Never leak a polluted prototype into the rest of the suite.
+      delete (Object.prototype as unknown as Record<string, unknown>).rel;
+    }
+  });
+
+  it('still writes through to a person whose own id is an inherited key', () => {
+    // Own properties win: only the *absence* of a person is what must not be
+    // filled in by the prototype chain.
+    const odd = makePerson('toString', 'friend', { rel: 40 });
+    const state = makeState(makeCharacter(), [odd]);
+    // Indexed through a variable: `state.people.toString` is the built-in.
+    const stored = (id: string): Person | undefined => state.people[id];
+
+    applyEffects(makeCtx(state, { ...odd, rel: 0 }), [
+      { kind: 'rel', who: 'target', delta: 15 },
+    ]);
+    expect(stored('toString')?.rel).toBe(55);
+
+    applyEffects(makeCtx(state), [{ kind: 'rel', who: 'toString', delta: 5 }]);
+    expect(stored('toString')?.rel).toBe(60);
   });
 });
 
@@ -400,5 +535,251 @@ describe('applyEffects: ordering', () => {
     ];
     const entries = applyEffects(makeCtx(state), effects);
     expect(entries.map((e) => e.icon)).toEqual(['1', '⚖️', '3']);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   The content lint that keeps such numbers out in the first place
+
+   The other half of the money guard above. The engine now refuses to *store* a
+   number it cannot read; this is where the pack that authored one is told about
+   it, before anybody plays it. The two are one fix, so the lint is covered here
+   beside the write path it protects.
+--------------------------------------------------------------------------- */
+
+function packOf(parts: Omit<ContentPack, 'id'>): ContentRegistry {
+  return buildRegistry([{ id: 'lint', ...parts }]);
+}
+
+function aJob(over: Partial<JobDef> = {}): JobDef {
+  return {
+    id: 'clerk',
+    track: 'office',
+    title: 'Clerk',
+    icon: '💼',
+    level: 1,
+    baseSalary: 30000,
+    raisePct: 0.03,
+    req: {},
+    ...over,
+  };
+}
+
+function anEvent(over: Partial<EventDef> = {}): EventDef {
+  return {
+    id: 'life-something',
+    area: 'life',
+    icon: '🎲',
+    minAge: 0,
+    maxAge: 100,
+    weight: 1,
+    text: 'Something happened.',
+    ...over,
+  };
+}
+
+function aSchool(over: Partial<SchoolDef> = {}): SchoolDef {
+  return { id: 'primary', label: 'Primary', level: 'primary', years: 5, tuitionPerYear: 0, ...over };
+}
+
+/** The three compulsory levels, so a school fixture does not trip that lint too. */
+function ladder(): SchoolDef[] {
+  return [
+    aSchool(),
+    aSchool({ id: 'middle', label: 'Middle', level: 'middle', years: 3 }),
+    aSchool({ id: 'high', label: 'High', level: 'high', years: 4 }),
+  ];
+}
+
+describe('validateRegistry: numbers that would poison the balance sheet', () => {
+  it('names a salary or a raise that is not a number', () => {
+    const problems = validateRegistry(
+      packOf({
+        jobs: [
+          aJob({ id: 'ghost', baseSalary: Number.NaN }),
+          aJob({ id: 'endless', baseSalary: Number.POSITIVE_INFINITY }),
+          aJob({ id: 'owed', baseSalary: -1 }),
+          aJob({ id: 'unraised', raisePct: Number.NaN }),
+        ],
+      })
+    );
+
+    expect(problems).toContain('job "ghost" has baseSalary NaN');
+    expect(problems).toContain('job "endless" has baseSalary Infinity');
+    expect(problems).toContain('job "owed" has baseSalary -1');
+    expect(problems).toContain('job "unraised" has raisePct NaN');
+    // A pay cut is a legitimate raise, so only the unreadable one is named.
+    expect(validateRegistry(packOf({ jobs: [aJob({ raisePct: -0.1 })] }))).toEqual([]);
+  });
+
+  it('names a broken country multiplier', () => {
+    const problems = validateRegistry(
+      packOf({
+        countries: [
+          { id: 'nowhere', label: 'Nowhere', flag: '🏳️', costMult: Number.NaN, taxMult: 1, visaDifficulty: 0.5 },
+          { id: 'free', label: 'Free', flag: '🏴', costMult: 1, taxMult: Number.POSITIVE_INFINITY, visaDifficulty: -1 },
+        ],
+      })
+    );
+
+    expect(problems).toContain('country "nowhere" has costMult NaN');
+    expect(problems).toContain('country "free" has taxMult Infinity');
+    expect(problems).toContain('country "free" has visaDifficulty -1');
+  });
+
+  it('names broken illness odds and costs', () => {
+    const problems = validateRegistry(
+      packOf({
+        illnesses: [
+          {
+            id: 'dragonpox',
+            label: 'dragonpox',
+            chronic: false,
+            lethality: Number.NaN,
+            onsetWeight: () => 1,
+            healthHit: Number.POSITIVE_INFINITY,
+            treatCost: Number.NaN,
+            cureChance: -1,
+          },
+        ],
+      })
+    );
+
+    expect(problems).toContain('illness "dragonpox" has lethality NaN');
+    expect(problems).toContain('illness "dragonpox" has cureChance -1');
+    expect(problems).toContain('illness "dragonpox" has healthHit Infinity');
+    expect(problems).toContain('illness "dragonpox" has treatCost NaN');
+  });
+
+  it('names a broken tuition and a programme nobody could ever finish', () => {
+    const problems = validateRegistry(
+      packOf({
+        schools: [
+          ...ladder(),
+          aSchool({ id: 'uni', level: 'university', years: 4, tuitionPerYear: Number.NaN }),
+          aSchool({ id: 'instant', level: 'postgrad', years: 0, tuitionPerYear: 1000 }),
+        ],
+      })
+    );
+
+    expect(problems).toContain('school "uni" has tuitionPerYear NaN');
+    expect(problems).toContain('school "instant" has years 0');
+  });
+
+  it('names a payout range that is unreadable or backwards', () => {
+    const base = { icon: '🛍️', minAge: 10, successChance: () => 0.5 } as const;
+    const problems = validateRegistry(
+      packOf({
+        crimes: [
+          { id: 'void', label: 'Void', ...base, payout: [Number.NaN, Number.NaN], sentenceYears: [1, 3] },
+          { id: 'backwards', label: 'Backwards', ...base, payout: [500, 20], sentenceYears: [1, 3] },
+          { id: 'endless', label: 'Endless', ...base, payout: [20, 200], sentenceYears: [1, Number.POSITIVE_INFINITY] },
+        ],
+      })
+    );
+
+    expect(problems).toContain('crime "void" has a non-finite payout range');
+    expect(problems).toContain('crime "backwards" has a reversed payout range');
+    expect(problems).toContain('crime "endless" has a non-finite sentenceYears range');
+    // One line for the range, not one per bound.
+    expect(problems.filter((p) => p.includes('payout range'))).toHaveLength(2);
+  });
+
+  it('names an unreadable delta on an event effect and on an outcome effect', () => {
+    const problems = validateRegistry(
+      packOf({
+        events: [
+          anEvent({ id: 'windfall', effects: [{ kind: 'money', delta: Number.NaN }] }),
+          anEvent({
+            id: 'gamble',
+            choices: [
+              {
+                label: 'Bet',
+                outcomes: [
+                  { weight: 1, text: 'Up.', effects: [{ kind: 'money', delta: Number.POSITIVE_INFINITY }] },
+                  { weight: 1, text: 'Down.', effects: [{ kind: 'stat', stat: 'happiness', delta: Number.NaN }] },
+                ],
+              },
+            ],
+          }),
+          anEvent({
+            id: 'spiral',
+            effects: [
+              { kind: 'fame', delta: Number.NaN },
+              { kind: 'rel', who: 'partner', delta: Number.NaN },
+              { kind: 'addiction', which: 'alcohol', delta: Number.NaN },
+            ],
+          }),
+        ],
+      })
+    );
+
+    expect(problems).toContain('event "windfall" has a money delta of NaN');
+    expect(problems).toContain('event "gamble" choice "Bet" outcome 0 has a money delta of Infinity');
+    expect(problems).toContain('event "gamble" choice "Bet" outcome 1 has a stat delta of NaN');
+    expect(problems).toContain('event "spiral" has a fame delta of NaN');
+    expect(problems).toContain('event "spiral" has a rel delta of NaN');
+    expect(problems).toContain('event "spiral" has a addiction delta of NaN');
+  });
+
+  it('names broken upkeep and appreciation on an asset', () => {
+    const problems = validateRegistry(
+      packOf({
+        assets: [
+          { id: 'ghost', type: 'vehicle', label: 'Ghost', icon: '🚗', price: 20000, upkeepPct: Number.NaN, apprPct: -0.1 },
+          { id: 'rocket', type: 'property', label: 'Rocket', icon: '🚀', price: 1000, upkeepPct: 0.01, apprPct: Number.POSITIVE_INFINITY },
+        ],
+      })
+    );
+
+    expect(problems).toContain('asset "ghost" has upkeepPct NaN');
+    expect(problems).toContain('asset "rocket" has apprPct Infinity');
+  });
+
+  it('leaves an ordinary, well-formed pack completely clean', () => {
+    // The lint was widened, not tightened: plausible content still validates.
+    const reg = packOf({
+      jobs: [aJob()],
+      schools: [...ladder(), aSchool({ id: 'uni', level: 'university', years: 4, tuitionPerYear: 15000 })],
+      countries: [{ id: 'us', label: 'the States', flag: '🇺🇸', costMult: 1, taxMult: 1, visaDifficulty: 0.5 }],
+      assets: [{ id: 'sedan', type: 'vehicle', label: 'Sedan', icon: '🚗', price: 20000, upkeepPct: 0.05, apprPct: -0.1 }],
+      illnesses: [
+        {
+          id: 'flu',
+          label: 'the flu',
+          chronic: false,
+          lethality: 0.001,
+          onsetWeight: () => 1,
+          healthHit: 10,
+          treatCost: 200,
+          cureChance: 0.8,
+        },
+      ],
+      crimes: [
+        {
+          id: 'shoplift',
+          label: 'Shoplifting',
+          icon: '🛍️',
+          minAge: 10,
+          successChance: () => 0.5,
+          payout: [20, 200],
+          sentenceYears: [1, 3],
+        },
+      ],
+      events: [
+        anEvent({
+          effects: [
+            { kind: 'money', delta: -250 },
+            { kind: 'stat', stat: 'happiness', delta: -5 },
+          ],
+          choices: [
+            { label: 'Pay up', outcomes: [{ weight: 1, text: 'Fine.', effects: [{ kind: 'fame', delta: 0 }] }] },
+          ],
+        }),
+      ],
+    });
+
+    expect(validateRegistry(reg)).toEqual([]);
+    expect(validateRegistry(buildRegistry([]))).toEqual([]);
   });
 });

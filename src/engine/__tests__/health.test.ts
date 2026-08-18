@@ -305,15 +305,70 @@ describe('healthPhase progression', () => {
     expect(entries).toEqual([]);
   });
 
-  it('ignores an illness whose definition is gone from the registry', () => {
+  /* A row whose def is gone is inert everywhere else — it never ages, never
+     rolls recovery, is invisible to the death check and cannot be cured, since
+     the curing effect would have to ship in the very pack that is missing — so
+     skipping it parks it on the Health sheet for good with no label to render.
+     It is dropped instead, like `educationPhase` emptying a vanished desk. */
+  it('drops an illness whose definition is gone from the registry', () => {
     const state = makeState({ illnesses: [{ defId: 'ghost', years: 1, treated: false }] });
 
     const entries = healthPhase(makeCtx(state, emptyRegistry()));
 
+    expect(state.character.illnesses).toEqual([]);
+    // Silently: content drift is not a life event worth a log line.
     expect(entries).toEqual([]);
     expect(state.character.stats.health).toBe(80);
     // No definition, no roll: an unknown illness cannot shift the draw budget.
     expect(state.rngState).toBe(initialRngState(SEED));
+  });
+
+  it('stays dropped, instead of riding along for the rest of the life', () => {
+    const reg = emptyRegistry();
+    const state = makeState({ illnesses: [{ defId: 'ghost', years: 0, treated: false }] });
+
+    for (let year = 0; year < 20; year += 1) healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([]);
+  });
+
+  it('drops every def-less row while leaving the rest of the sheet alone', () => {
+    const reg = registryWith([makeIllness({ onsetWeight: () => 0, cureChance: 0 })]);
+    const state = makeState({
+      illnesses: [
+        { defId: 'ghost', years: 3, treated: true },
+        { defId: 'flu', years: 1, treated: false },
+        { defId: 'wraith', years: 7, treated: false },
+      ],
+    });
+
+    healthPhase(makeCtx(state, reg));
+
+    // The one real illness ages and takes its progression hit; both phantoms go.
+    expect(state.character.illnesses).toEqual([{ defId: 'flu', years: 2, treated: false }]);
+    expect(state.character.stats.health).toBe(70);
+  });
+
+  it('drops a phantom without shifting a single draw', () => {
+    const reg = registryWith([
+      makeIllness({ id: 'flu', label: 'the flu', onsetWeight: () => 0, cureChance: 0 }),
+      makeIllness({ id: 'gout', label: 'gout', onsetWeight: () => 0.5, cureChance: 0 }),
+    ]);
+    const withPhantom = makeState({
+      illnesses: [
+        { defId: 'flu', years: 1, treated: false },
+        { defId: 'ghost', years: 2, treated: false },
+      ],
+    });
+    const without = makeState({ illnesses: [{ defId: 'flu', years: 1, treated: false }] });
+
+    healthPhase(makeCtx(withPhantom, reg));
+    healthPhase(makeCtx(without, reg));
+
+    // One onset roll for the un-held gout, one recovery roll for the flu, both times.
+    expect(withPhantom.rngState).toBe(without.rngState);
+    expect(withPhantom.character.illnesses).toEqual(without.character.illnesses);
+    expect(withPhantom.character.stats.health).toBe(without.character.stats.health);
   });
 });
 

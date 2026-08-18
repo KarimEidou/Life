@@ -329,6 +329,93 @@ describe('addPerson', () => {
     expect(person.id).toBe('p1');
     expect(state.character.flags.nextPersonId).toBe(2);
   });
+
+  /* `nextPersonId` is an ordinary flag: content writes it through
+     `{ kind: 'flag' }` with no reserved-name protection, and a hand-edited or
+     truncated save can hold anything at all. Restarting the counter at 1 would
+     re-mint `p1` — the exact shape `state.people` already holds — and the store
+     would replace whoever lives there, so every damaged value has to land on a
+     free id instead. */
+  const damaged: readonly (boolean | number | string)[] = [
+    'oops',
+    true,
+    0,
+    -3,
+    1.5e-9,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_VALUE,
+  ];
+
+  for (const value of damaged) {
+    it(`mints a free id and replaces nobody when the counter is ${String(value)}`, () => {
+      const state = createLife(testRegistry(), { seed: 112 });
+      const before = { ...state.people };
+      const ids = Object.keys(before);
+      expect(ids.length).toBeGreaterThanOrEqual(2);
+
+      state.character.flags.nextPersonId = value;
+      const person = addPerson(state, { ...stranger, name: 'Newcomer', flags: {} });
+
+      // A fresh id, not one that was already handed out.
+      expect(ids).not.toContain(person.id);
+      expect(person.id).toBe(`p${ids.length + 1}`);
+      expect(state.people[person.id]).toBe(person);
+      // Every existing person is untouched — same id, same object.
+      for (const id of ids) {
+        expect(state.people[id]).toBe(before[id]);
+      }
+      expect(Object.keys(state.people)).toHaveLength(ids.length + 1);
+      // And the counter is usable again for the next call.
+      expect(state.character.flags.nextPersonId).toBe(ids.length + 2);
+      const after = addPerson(state, { ...stranger, name: 'Later', flags: {} });
+      expect(after.id).toBe(`p${ids.length + 2}`);
+      expect(state.people[person.id]).toBe(person);
+    });
+  }
+
+  it('skips over ids the table already holds when the counter has fallen behind', () => {
+    const state = createLife(testRegistry(), { seed: 41 });
+    const before = { ...state.people };
+    const ids = Object.keys(before);
+
+    // A stale counter (rolled back by a save merge) points at a live person.
+    state.character.flags.nextPersonId = 1;
+    const person = addPerson(state, { ...stranger, name: 'Newcomer', flags: {} });
+
+    expect(person.id).toBe(`p${ids.length + 1}`);
+    for (const id of ids) {
+      expect(state.people[id]).toBe(before[id]);
+    }
+    expect(Object.keys(state.people)).toHaveLength(ids.length + 1);
+  });
+
+  it('rebuilds a lost counter above the highest id still in the table', () => {
+    const state = createLife(testRegistry(), { seed: 44 });
+    const keep = state.people.p1;
+    // A save that dropped everyone but the highest-numbered person.
+    state.people = { p9: { ...keep, id: 'p9' } };
+    delete state.character.flags.nextPersonId;
+
+    const person = addPerson(state, { ...stranger, flags: {} });
+
+    expect(person.id).toBe('p10');
+    expect(state.people.p9.id).toBe('p9');
+    expect(state.character.flags.nextPersonId).toBe(11);
+  });
+
+  it('ignores ids that are not in the minted shape when rebuilding the counter', () => {
+    const state = createLife(testRegistry(), { seed: 45 });
+    const keep = state.people.p1;
+    state.people = { p2: { ...keep, id: 'p2' }, spouse: { ...keep, id: 'spouse' } };
+    delete state.character.flags.nextPersonId;
+
+    const person = addPerson(state, { ...stranger, flags: {} });
+
+    expect(person.id).toBe('p3');
+    expect(state.people.spouse.id).toBe('spouse');
+    expect(state.people.p2.id).toBe('p2');
+  });
 });
 
 describe('pronounsFor', () => {

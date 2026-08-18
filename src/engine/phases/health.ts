@@ -10,7 +10,9 @@
  * unconditionally — `rng.chance` always draws — so the budget is a function of
  * the registry and of what is held, never of a probability or of whether the
  * condition is being treated. Chronic conditions never resolve, so they are the
- * one case that consumes no recovery draw.
+ * one case that consumes no recovery draw. A held row whose definition is gone
+ * is dropped rather than skipped — silently and without a draw, so it never
+ * enters the budget at all; see the progression loop.
  *
  * `Illness.treated` is a modifier, not a gate: treatment holds a condition steady
  * (it stops costing health) and doubles the odds of shaking a non-chronic one off.
@@ -93,9 +95,25 @@ export function healthPhase(ctx: Ctx): LogEntry[] {
     entries.push({ icon: '🤒', kind: 'health', text: `You came down with ${def.label}.` });
   }
 
+  /* Rows whose definition has vanished, collected here and dropped after the
+     loop. A save can outlive the pack that defined one of its illnesses, and an
+     `{kind:'illness', add}` effect can name an id no pack ever shipped. Nothing
+     downstream can move such a row: it never ages, never rolls recovery, is
+     invisible to `deathCheckPhase`'s hazard and cause-of-death, has no label the
+     UI can render, and cannot even be cured — the `{kind:'illness', cure}`
+     effect would have to come from the very pack that is missing — so skipping
+     it parks it on the Health sheet for the rest of the life. It is dropped
+     instead, exactly as `educationPhase` empties a desk whose school is gone.
+     Like `ageUp`'s `discardPending` this consumes no randomness, so the yearly
+     budget stays a function of the registry and the year replays identically. */
+  const phantom = new Set<Illness>();
+
   for (const illness of carried) {
     const def = findIllness(ctx.reg, illness.defId);
-    if (!def) continue;
+    if (!def) {
+      phantom.add(illness);
+      continue;
+    }
     illness.years += 1;
 
     /* A chronic condition is held for life and takes no recovery draw; anything
@@ -120,6 +138,10 @@ export function healthPhase(ctx: Ctx): LogEntry[] {
         text: `You are getting seriously ill with ${def.label}.`,
       });
     }
+  }
+
+  if (phantom.size > 0) {
+    c.illnesses = c.illnesses.filter((illness) => !phantom.has(illness));
   }
 
   for (const key of ADDICTION_KEYS) {

@@ -541,6 +541,387 @@ describe('loans in the finance phase', () => {
 });
 
 /* ---------------------------------------------------------------------------
+   A debt with no way to pay it
+--------------------------------------------------------------------------- */
+
+/** A graduate on their own with tuition owed and, by default, no way to pay it. */
+function jobless(seed: number): GameState {
+  const state = newLife(seed);
+  const c = state.character;
+  c.age = 22;
+  c.money = 0;
+  c.flags.livesWithParents = false;
+  c.education = { level: 'university', year: 0, gpa: 3, studyHard: false };
+  c.loans = [{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }];
+  return state;
+}
+
+describe('a year that cannot service a loan', () => {
+  it('holds the balance instead of compounding it for the rest of the life', () => {
+    const state = jobless(80);
+    const c = state.character;
+    const feed: string[] = [];
+
+    for (let year = 0; year < 60; year += 1) {
+      feed.push(...texts(financePhase(ctxFor(state))));
+      c.age += 1;
+      /* Not one dollar of it moves: an instalment is taken out of the cash on
+         hand, and a graduate with no wage, no pots and nothing to sell never has
+         any. Tuition also survives bankruptcy on purpose, so the balance had no
+         exit of any kind and simply compounded at 5% for sixty years — 88000
+         reached 182947 by 37, 790687 by 67 and 1643781 by 82, all of it quoted
+         by the HUD, the finance sheet and the death screen. */
+      expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }]);
+    }
+
+    expect(c.age).toBe(82);
+    expect(netWorth(state)).toBe(-88000);
+    // Sixty years of it, and the feed never says a word about any of them.
+    expect(feed).toEqual([]);
+    expect(c.money).toBe(0);
+    expect(c.flags.bankrupt).toBeUndefined();
+  });
+
+  it('is a hold and not a write-off: the debt is still owed in full', () => {
+    const state = jobless(81);
+    const c = state.character;
+
+    for (let year = 0; year < 20; year += 1) {
+      financePhase(ctxFor(state));
+      c.age += 1;
+    }
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }]);
+
+    // A wage at 42 puts the same 88000 back on the schedule it was always on.
+    c.job = job(70000);
+    const feed: string[] = [];
+    let years = 0;
+    while (c.loans.length > 0 && years < 60) {
+      feed.push(...texts(financePhase(ctxFor(state))));
+      c.age += 1;
+      years += 1;
+    }
+
+    // 23 instalments: the wage is earned and paid over inside the same year.
+    expect(years).toBe(23);
+    expect(feed).toEqual(['You paid off your student loan.']);
+  });
+
+  it('takes the instalment out of the pots, but never out of the roof overhead', () => {
+    /* The pots are the character's own money — `withdrawInvestment` moves them
+       back for free and `netWorth` counts them — so an instalment reaches them
+       exactly as the year's shortfall does. Leaving them out meant a millionaire
+       whose cash happened to sit in a savings account paid nothing at all, for
+       ever, on a balance the forbearance floor had already frozen. */
+    const pots = jobless(82);
+    pots.character.investments = { savings: 100000, index: 0, crypto: 0 };
+    financePhase(ctxFor(pots));
+    // 4400 of interest and 13200 off the balance, out of the pot.
+    expect(pots.character.loans[0].principal).toBe(74800);
+    // 102000 after the 2%, less the 20000 the year cost and the 17600 instalment.
+    expect(pots.character.investments.savings).toBe(64400);
+
+    /* An asset is another matter: a house is not spending money. It is sold by a
+       shortfall big enough to threaten the whole year and by nothing else, so it
+       never funds an instalment and the balance simply holds. */
+    const owner = jobless(83);
+    owner.character.assets = [
+      { id: 'a1', defId: 'scooter', label: 'scooter', paid: 2000, value: 2000, yearBought: 2020 },
+    ];
+    financePhase(ctxFor(owner));
+    expect(owner.character.loans[0].principal).toBe(88000);
+    expect(owner.character.assets).toEqual([]);
+  });
+
+  it('puts a pensioner on the schedule in the very year the pension lands', () => {
+    const state = jobless(84);
+    const c = state.character;
+    c.flags.pensionSalary = 30000;
+
+    financePhase(ctxFor(state));
+
+    /* 30000 of pension, 5000 of tax and 20000 of keep: the year ends 5000 up and
+       all 5000 of it reaches the lender. Settling the loan out of the cash the
+       year *opened* with instead meant this pensioner paid nothing in their
+       first year — and, ending every year at zero, nothing in any year after
+       either. 5000 does not cover the 4400 of interest plus a share, so the rest
+       is forborne and the balance still falls rather than growing. */
+    expect(c.loans[0].principal).toBe(87400);
+    expect(c.money).toBe(0);
+
+    // And it goes on falling, every year, out of the same pension.
+    let previous = 87400;
+    for (let year = 0; year < 5; year += 1) {
+      c.age += 1;
+      financePhase(ctxFor(state));
+      expect(c.loans[0].principal).toBeLessThan(previous);
+      previous = c.loans[0].principal;
+    }
+    expect(c.money).toBe(0);
+  });
+
+  it('holds the balance when a payment cannot cover the year of interest', () => {
+    const state = jobless(85);
+    const c = state.character;
+    // 20000 of keep and 100 over, so exactly 100 reaches the lender.
+    c.money = 20100;
+
+    financePhase(ctxFor(state));
+
+    /* 100 against 4400 of interest: the lender takes it, and the rest of the
+       interest is forborne instead of being added to the balance. Growing it to
+       92300 on the strength of a token payment is the same compounding by
+       another name. */
+    expect(c.loans[0].principal).toBe(88000);
+    expect(c.money).toBe(0);
+  });
+
+  it('leaves a working graduate on exactly the schedule it always had', () => {
+    const state = jobless(86);
+    const c = state.character;
+    c.job = job(70000);
+    const feed: string[] = [];
+    let years = 0;
+
+    while (c.loans.length > 0 && years < 60) {
+      feed.push(...texts(financePhase(ctxFor(state))));
+      c.age += 1;
+      years += 1;
+    }
+
+    /* The control the hold must not touch: someone who can service the debt
+       clears it on the amortisation schedule, in one payoff line. 23 years of
+       instalments, starting with the first wage the graduate earns rather than
+       the year after it. */
+    expect(years).toBe(23);
+    expect(feed).toEqual(['You paid off your student loan.']);
+  });
+
+  it('keeps a graduate on a modest wage bounded for the whole of their life', () => {
+    /* The ordinary way to play, and the case a rule written around whether an
+       income *exists* let straight through: a clerk nets +1000 a year against
+       4400 of interest, so the balance grew ~3400 a year and compounded — 212099
+       by 42, 529695 by 62 and 1307976 by 81, all of it quoted by the HUD, the
+       finance sheet and the death screen. What matters is whether anything can
+       actually reach the loan, and 1000 a year cannot. */
+    const state = jobless(87);
+    const c = state.character;
+    c.job = { jobId: 'clerk', title: 'Clerk', salary: 25000, years: 1, performance: 50, workHard: false };
+    let worst = 0;
+
+    for (let age = 22; age <= 81; age += 1) {
+      financePhase(ctxFor(state));
+      worst = Math.max(worst, c.loans[0].principal);
+      c.age += 1;
+    }
+
+    expect(c.age).toBe(82);
+    expect(worst).toBe(88000);
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }]);
+    expect(netWorth(state)).toBe(-88000 + c.money);
+  });
+
+  it('keeps a retiree on a pension bounded too', () => {
+    // 6000 of pension against 20000 of keep: the year still cannot reach the
+    // loan, and the balance ran to 380334 by 99 when it was allowed to compound.
+    const state = jobless(88);
+    const c = state.character;
+    c.age = 70;
+    c.flags.pensionSalary = 6000;
+
+    for (let age = 70; age <= 99; age += 1) {
+      financePhase(ctxFor(state));
+      c.age += 1;
+    }
+
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }]);
+    expect(c.money).toBe(0);
+  });
+
+  it('never grows a balance, at any income and any rate the game charges', () => {
+    /* The invariant itself, swept across the incomes that used to decide it —
+       nothing at all, a pension, a wage — and every rate the engine issues. */
+    const incomes: readonly (readonly [string, number, number])[] = [
+      ['destitute', 0, 0],
+      ['pensioner', 0, 6000],
+      ['clerk', 25000, 0],
+      ['earner', 25000, 6000],
+    ];
+    const debts: readonly (readonly [Loan['kind'], number, number])[] = [
+      ['student', 88000, 0.05],
+      ['mortgage', 200000, 0.06],
+      ['auto', 14000, 0.09],
+      ['personal', 15000, 0.09],
+    ];
+
+    for (const [label, salary, pension] of incomes) {
+      for (const [kind, principal, apr] of debts) {
+        const state = newLife(89);
+        const c = state.character;
+        c.age = 25;
+        c.money = 0;
+        c.flags.livesWithParents = false;
+        if (salary > 0) c.job = job(salary);
+        if (pension > 0) c.flags.pensionSalary = pension;
+        c.loans = [{ id: 'l1', kind, principal, apr }];
+
+        let previous = principal;
+        for (let year = 0; year < 60 && c.loans.length > 0; year += 1) {
+          financePhase(ctxFor(state));
+          const now = c.loans.length > 0 ? c.loans[0].principal : 0;
+          expect({ label, kind, now }).toEqual({ label, kind, now: Math.min(now, previous) });
+          previous = now;
+        }
+      }
+    }
+  });
+
+  it('still amortises a solvent borrower to zero on the same schedule', () => {
+    /* The other half of the invariant: forbearance only ever holds back interest
+       a payment could not cover, so a borrower whose instalment clears it pays
+       the loan down exactly as before, year on year, and clears it once. */
+    const state = newLife(90);
+    const c = state.character;
+    c.age = 30;
+    c.money = 40000;
+    c.flags.livesWithParents = false;
+    c.job = job(90000);
+    c.loans = [{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }];
+
+    const feed: string[] = [];
+    let previous = 88000;
+    let years = 0;
+
+    while (c.loans.length > 0 && years < 60) {
+      feed.push(...texts(financePhase(ctxFor(state))));
+      const now = c.loans.length > 0 ? c.loans[0].principal : 0;
+      expect(now).toBeLessThan(previous);
+      previous = now;
+      c.age += 1;
+      years += 1;
+    }
+
+    // 23 years of the 15% share and its 1000 floor, never cash-constrained.
+    expect(years).toBe(23);
+    expect(feed).toEqual(['You paid off your student loan.']);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   Money in the other pocket
+--------------------------------------------------------------------------- */
+
+describe('a borrower whose money is not in the current account', () => {
+  it('amortises a pot-rich borrower to zero instead of freezing them for ever', () => {
+    /* The instalment used to be the first move of the year, taken against the
+       cash the year *opened* with and against nothing else — and `financePhase`
+       ends every short year at zero. So a millionaire whose money sat in a
+       savings account paid exactly nothing, and the forbearance floor that stops
+       an unpayable balance growing froze it there: 30 years, $50,000 still owed,
+       $8.2M in the bank, not one dollar of it repaid. */
+    const state = newLife(121);
+    const c = state.character;
+    c.age = 40;
+    c.money = 0;
+    c.flags.livesWithParents = false;
+    c.investments = { savings: 5_000_000, index: 0, crypto: 0 };
+    c.loans = [{ id: 'l1', kind: 'personal', principal: 50000, apr: 0.09 }];
+
+    const feed: string[] = [];
+    let previous = 50000;
+    let years = 0;
+
+    while (c.loans.length > 0 && years < 30) {
+      feed.push(...texts(financePhase(ctxFor(state))));
+      const now = c.loans.length > 0 ? c.loans[0].principal : 0;
+      // Every year buys the balance down: 9% of interest plus the 15% share.
+      expect(now).toBeLessThan(previous);
+      previous = now;
+      c.age += 1;
+      years += 1;
+    }
+
+    expect(c.loans).toEqual([]);
+    expect(feed).toEqual(['You paid off your personal loan.']);
+    // Paid out of the pot the drawdown already treats as the character's money.
+    expect(c.investments.savings).toBeLessThan(5_000_000 * 1.02 ** years);
+    expect(netWorth(state)).toBe(c.money + c.investments.savings);
+  });
+
+  it('is not a free perpetual capital injection to bank the loan and never pay it', () => {
+    /* The deliberate version: `depositInvestment` moves cash out of reach for
+       nothing, so every year opened at zero, every instalment was zero, and a
+       9% loan that could neither grow nor shrink handed the player 600,000
+       dollars to invest for the rest of their life. */
+    const state = newLife(21);
+    const c = state.character;
+    c.age = 30;
+    c.flags.livesWithParents = false;
+    c.job = job(120000);
+
+    expect(takeLoan(state, REG, 600000)).toEqual({ ok: true });
+    expect(c.money).toBe(600000);
+
+    const feed: string[] = [];
+    for (let year = 0; year < 40; year += 1) {
+      depositInvestment(state, 'savings', c.money);
+      feed.push(...texts(financePhase(ctxFor(state))));
+      c.age += 1;
+    }
+
+    expect(c.loans).toEqual([]);
+    expect(feed).toEqual(['You paid off your personal loan.']);
+  });
+
+  it('still freezes the balance of a borrower who genuinely has nothing', () => {
+    /* The control the drawdown must not touch: reaching into the pots is not the
+       same as inventing money. With nothing in them and nothing coming in, the
+       instalment is still zero and the balance still cannot grow — and the pots
+       are left at zero rather than going negative. Tuition, because that is the
+       debt with no other terminal state: anything else here is discharged by the
+       bankruptcy block on the first short year. */
+    const state = jobless(122);
+    const c = state.character;
+
+    for (let year = 0; year < 30; year += 1) {
+      expect(texts(financePhase(ctxFor(state)))).toEqual([]);
+      c.age += 1;
+    }
+
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 88000, apr: 0.05 }]);
+    expect(c.investments).toEqual({ savings: 0, index: 0, crypto: 0 });
+    expect(c.money).toBe(0);
+    expect(netWorth(state)).toBe(-88000);
+  });
+
+  it('takes only what the instalment needs, in the drawdown order', () => {
+    const state = newLife(123);
+    const c = state.character;
+    // A minor pays no keep, so the only draw on the pots is the instalment.
+    c.age = 17;
+    c.money = 0;
+    c.investments = { savings: 5000, index: 100000, crypto: 50000 };
+    state.rngState = initialRngState(99);
+    c.loans = [{ id: 'l1', kind: 'personal', principal: 40000, apr: 0.09 }];
+
+    const probe = { rngState: initialRngState(99) };
+    const mirror = createRng(probe);
+    const grownIndex = Math.round(100000 * (1 + mirror.normal(0.07, 0.15)));
+    const grownCrypto = Math.round(50000 * (1 + mirror.normal(0.15, 0.6)));
+
+    financePhase(ctxFor(state));
+
+    // 3600 of interest plus 6000 off the balance: 5100 of savings, then 4500 more.
+    expect(c.loans[0].principal).toBe(34000);
+    expect(c.investments.savings).toBe(0);
+    expect(c.investments.index).toBe(grownIndex - 4500);
+    // The volatile pot is last and was never reached.
+    expect(c.investments.crypto).toBe(grownCrypto);
+    expect(c.money).toBe(0);
+  });
+});
+
+/* ---------------------------------------------------------------------------
    Investments and assets
 --------------------------------------------------------------------------- */
 
@@ -644,13 +1025,14 @@ describe('a shortfall drawing on the investment pots', () => {
 
     expect(texts(entries)).toEqual([]);
     expect(c.flags.bankrupt).toBeUndefined();
-    // 8000 of living plus 12000 of rent, out of the 2,040,000 the pot grew to.
-    expect(c.investments.savings).toBe(2020000);
+    /* 8000 of living plus 12000 of rent, then the 24000 instalment — 6000 of
+       interest and 18000 off the balance — out of the 2,040,000 the pot grew to.
+       Nothing was written off: a character who can pay does not get their debts
+       discharged for keeping their money in the bank. */
+    expect(c.investments.savings).toBe(1996000);
     expect(c.money).toBe(0);
-    /* And nothing was written off: a character who can pay does not get their
-       debts discharged for keeping their money in the bank. */
-    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 126000, apr: 0.05 }]);
-    expect(netWorth(state)).toBe(2020000 - 126000);
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 102000, apr: 0.05 }]);
+    expect(netWorth(state)).toBe(1996000 - 102000);
   });
 
   it('drains savings first, then the index fund, and takes only what it needs', () => {
@@ -740,7 +1122,9 @@ describe('forced sales and bankruptcy', () => {
       'You sold your sedan to stay afloat.',
     ]);
     expect(state.character.assets.map((a) => a.label)).toEqual(['condo']);
-    expect(state.character.money).toBe(8840);
+    // A forced sale fetches the same 90% a voluntary one does: 1620 for the
+    // scooter, then 16200 for the sedan, against 10960 of costs.
+    expect(state.character.money).toBe(6860);
     expect(state.character.flags.bankrupt).toBeUndefined();
   });
 
@@ -769,7 +1153,7 @@ describe('forced sales and bankruptcy', () => {
     expect(c.flags.bankrupt).toBe(true);
     expect(c.stats.happiness).toBe(30);
     /* The pot the character actually owned went into the 20000 shortfall before
-       any of this: 4080 of savings, then 1800 from the scooter, leaving 14120
+       any of this: 4080 of savings, then 1620 from the scooter, leaving 14300
        the estate could not cover. Bankruptcy never reaches into the pots — by
        the time it fires there is nothing left in them to reach for. */
     expect(c.investments).toEqual({ savings: 0, index: 0, crypto: 0 });
@@ -828,7 +1212,9 @@ describe('forced sales and bankruptcy', () => {
     expect(texts(entries)).toEqual([]);
     expect(c.flags.bankrupt).toBeUndefined();
     expect(c.stats.happiness).toBe(50);
-    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 19900, apr: 0 }]);
+    // The 100 went on the year's keep, which is settled before any lender is,
+    // so nothing reached the loan and the balance holds rather than compounding.
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 20000, apr: 0 }]);
     expect(c.money).toBe(0);
   });
 
@@ -853,7 +1239,7 @@ describe('forced sales and bankruptcy', () => {
     expect(c.loans).toEqual([{ id: 'l2', kind: 'student', principal: 30000, apr: 0 }]);
   });
 
-  it('reports the collapse once and leaves an already bankrupt character alone', () => {
+  it('reports the collapse once and still discharges a debt taken on after it', () => {
     const state = newLife(54);
     const c = state.character;
     c.age = 30;
@@ -872,11 +1258,17 @@ describe('forced sales and bankruptcy', () => {
     c.loans = [{ id: 'l9', kind: 'personal', principal: 4000, apr: 0 }];
     const second = financePhase(ctxFor(state));
 
+    /* The flag governs the notice and the grief, not the write-off: the line is
+       not repeated and no further grief is charged, but the new debt is still
+       discharged. Gating the discharge on it too locked the character out of the
+       only terminal state non-student debt has — the balance could not shrink,
+       could not grow and could not be written off, and dragged `netWorth` down
+       for the rest of the life. */
     expect(texts(second)).toEqual([]);
     expect(c.money).toBe(0);
-    // The second year neither grieves again nor writes the new debt off.
     expect(c.stats.happiness).toBe(40);
-    expect(c.loans).toEqual([{ id: 'l9', kind: 'personal', principal: 4000, apr: 0 }]);
+    expect(c.loans).toEqual([]);
+    expect(netWorth(state)).toBe(0);
   });
 
   it('reports a second collapse once the character has recovered', () => {
@@ -924,8 +1316,10 @@ describe('forced sales and bankruptcy', () => {
        house that no longer exists compounds at 6% and takes 15% of the cash on
        hand every year for the rest of the life. */
     expect(c.loans).toEqual([]);
-    // 206000 of proceeds, less the 169600 the mortgage had grown to, less 10060 short.
-    expect(c.money).toBe(26340);
+    /* 185400 of proceeds (90% of the 206000 the condo revalued to), less the
+       160000 still owed — the balance held rather than compounding, because the
+       year opened with no cash to pay an instalment with — less 10060 short. */
+    expect(c.money).toBe(15340);
   });
 
   it('writes off the part of a secured loan a forced sale cannot cover', () => {
@@ -988,6 +1382,36 @@ describe('forced sales and bankruptcy', () => {
     // 81 broke years, one grief hit.
     expect(c.stats.happiness).toBe(70);
     expect(c.money).toBe(0);
+  });
+
+  it('discharges a debt taken on after a collapse the character never recovered from', () => {
+    /* The once-per-life flag only clears on a year that ends with money to
+       spare, so a character who never has one was locked out of the only
+       terminal state non-student debt has: the balance could not be paid, could
+       not grow and was never written off, and `netWorth` was 10000 too low on
+       the HUD, the finance sheet and the epitaph for fifty-five years. */
+    const state = newLife(91);
+    const c = state.character;
+    c.age = 40;
+    c.money = 0;
+    c.stats.happiness = 55;
+    c.flags.livesWithParents = false;
+    c.flags.bankrupt = true;
+
+    expect(takeLoan(state, REG, 10000)).toEqual({ ok: true });
+    c.money = 0;
+    const feed: string[] = [];
+
+    for (let age = 40; age <= 94; age += 1) {
+      feed.push(...texts(financePhase(ctxFor(state))));
+      c.age += 1;
+    }
+
+    expect(c.loans).toEqual([]);
+    expect(netWorth(state)).toBe(0);
+    // Silent and free: the flag still governs the notice and the grief.
+    expect(feed).toEqual([]);
+    expect(c.stats.happiness).toBe(55);
   });
 
   it('never calls a lifetime of being broke a bankruptcy when there is nothing to seize', () => {
@@ -1093,6 +1517,78 @@ describe('takeLoan', () => {
     expect(refused.ok).toBe(false);
     expect(refused.reason).toContain('$10,000');
     expect(takeLoan(state, REG, 10000).ok).toBe(true);
+  });
+
+  it('caps what the borrower owes in total, not one ticket at a time', () => {
+    /* The cap was compared against the amount being asked for and nothing else,
+       so `MAX_PERSONAL_LOANS` was the only real brake and the true ceiling was
+       *fifteen* years of salary: three maximal loans, in one year, $3,000,000 of
+       unsecured credit against the $1,000,000 the header promises. */
+    const state = newLife(94);
+    const c = state.character;
+    c.age = 30;
+    c.job = job(200000);
+
+    expect(takeLoan(state, REG, 1000000)).toEqual({ ok: true });
+    expect(takeLoan(state, REG, 1000000)).toEqual({
+      ok: false,
+      reason: 'The bank will only lend you $0.',
+    });
+    expect(takeLoan(state, REG, 1)).toEqual({
+      ok: false,
+      reason: 'The bank will only lend you $0.',
+    });
+
+    expect(c.money).toBe(1000000);
+    expect(c.loans).toHaveLength(1);
+  });
+
+  it('lends the headroom that is left, and lends it again once it is repaid', () => {
+    const state = newLife(95);
+    const c = state.character;
+    c.age = 30;
+    c.job = job(20000);
+
+    // 100000 of ceiling: 60000 of it goes, so 40000 is what is left to lend.
+    expect(takeLoan(state, REG, 60000)).toEqual({ ok: true });
+    expect(takeLoan(state, REG, 40001)).toEqual({
+      ok: false,
+      reason: 'The bank will only lend you $40,000.',
+    });
+    expect(takeLoan(state, REG, 40000)).toEqual({ ok: true });
+    expect(takeLoan(state, REG, 1).ok).toBe(false);
+
+    // Paying it down is what reopens the ceiling, exactly as far as it was paid.
+    repayLoan(state, c.loans[0].id, 25000);
+    expect(takeLoan(state, REG, 25001).ok).toBe(false);
+    expect(takeLoan(state, REG, 25000)).toEqual({ ok: true });
+    expect(c.loans.reduce((sum, loan) => sum + loan.principal, 0)).toBe(100000);
+  });
+
+  it('counts a mortgage against the same ceiling, and tuition against none of it', () => {
+    /* Secured principal is money this same bank is already owed, and `buyAsset`
+       opens those without asking for anything at all — leaving them out reopens
+       the whole hole through the showroom. Tuition is the other way round: the
+       engine issues it to a student who never chose the amount, so counting it
+       would leave a graduate unable to borrow for years on the strength of a
+       debt they were handed. */
+    const state = newLife(96);
+    const c = state.character;
+    c.age = 30;
+    c.job = job(50000);
+    c.money = 40000;
+    c.loans = [{ id: 'l9', kind: 'student', principal: 88000, apr: 0.05 }];
+
+    // 40000 down on a 200000 condo leaves a 160000 mortgage against a 250000 cap.
+    expect(buyAsset(state, REG, 'condo', true)).toEqual({ ok: true });
+    expect(c.money).toBe(0);
+
+    expect(takeLoan(state, REG, 90001)).toEqual({
+      ok: false,
+      reason: 'The bank will only lend you $90,000.',
+    });
+    expect(takeLoan(state, REG, 90000)).toEqual({ ok: true });
+    expect(c.money).toBe(90000);
   });
 
   it('refuses a fourth personal loan', () => {
@@ -1299,7 +1795,7 @@ describe('buyAsset', () => {
 });
 
 describe('sellAsset', () => {
-  it('pays out the current value and clears the loan secured against it', () => {
+  it('pays out the resale value and clears the loan secured against it', () => {
     const state = newLife(46);
     state.character.age = 30;
     state.character.money = 50000;
@@ -1308,12 +1804,14 @@ describe('sellAsset', () => {
     sellAsset(state, 'a1');
     const c = state.character;
 
-    // 10000 left after the deposit, plus 200000 of proceeds, less the 160000 owed.
-    expect(c.money).toBe(50000);
+    /* 10000 left after the deposit, plus 180000 of proceeds — 90% of the value,
+       because a trade costs the spread — less the 160000 owed. Refunding the
+       whole 200000 made the round trip exactly cash-neutral. */
+    expect(c.money).toBe(30000);
     expect(c.assets).toEqual([]);
     expect(c.loans).toEqual([]);
     expect(state.log[state.log.length - 1].entries.slice(-1)).toEqual([
-      { icon: '💵', kind: 'money', text: 'You sold your condo for $200,000.' },
+      { icon: '💵', kind: 'money', text: 'You sold your condo for $180,000.' },
     ]);
   });
 
@@ -1347,8 +1845,67 @@ describe('sellAsset', () => {
     expect(state.character.assets).toHaveLength(1);
 
     sellAsset(state, 'a1-30');
-    expect(state.character.money).toBe(10000);
+    // 1000 in hand plus 8100: 90% of the 9000 the sedan is now worth.
+    expect(state.character.money).toBe(9100);
     expect(state.character.loans).toHaveLength(1);
+  });
+});
+
+describe('buying and selling the same year', () => {
+  it('pays the purchase joy once a year however many times the player buys', () => {
+    const state = newLife(92);
+    const c = state.character;
+    c.age = 30;
+    c.money = 1000000;
+    c.stats.happiness = 20;
+
+    for (let round = 0; round < 20; round += 1) {
+      expect(buyAsset(state, REG, 'scooter')).toEqual({ ok: true });
+      sellAsset(state, c.assets[0].id);
+    }
+
+    /* Twenty round trips inside one year used to be a free ride from 20 to the
+       cap: the joy had no cooldown and no limit, and the sale refunded the whole
+       value, so the cash came back too. Happiness is charged for everywhere else
+       in the engine (`WORK_HARD_HAPPINESS`, `STUDY_HAPPINESS_COST`, the grief
+       above) and it holds a romance together and goes on the epitaph. */
+    expect(c.stats.happiness).toBe(28);
+    // And the churn is not free either: 200 a round, the spread on the resale.
+    expect(c.money).toBe(1000000 - 20 * 200);
+    expect(c.assets).toEqual([]);
+    expect(c.loans).toEqual([]);
+
+    // A purchase is still rewarding — once a year, not once a click.
+    c.age = 31;
+    expect(buyAsset(state, REG, 'scooter')).toEqual({ ok: true });
+    expect(c.stats.happiness).toBe(36);
+    expect(buyAsset(state, REG, 'scooter')).toEqual({ ok: true });
+    expect(c.stats.happiness).toBe(36);
+  });
+
+  it('leaves a financed round trip out of pocket instead of exactly where it started', () => {
+    const state = newLife(93);
+    const c = state.character;
+    c.age = 30;
+    // Exactly the 30% down payment on a sedan, and nothing else.
+    c.money = 6000;
+    c.stats.happiness = 20;
+
+    for (let round = 0; round < 20; round += 1) {
+      buyAsset(state, REG, 'sedan', true);
+      const held = c.assets[0];
+      if (held) sellAsset(state, held.id);
+    }
+
+    /* The secured loan is settled out of the proceeds and the deposit came back
+       whole, so the loop returned the exact 6000 it started with and could run
+       for ever. It now costs the spread, and the second round cannot even be
+       afforded. */
+    expect(c.money).toBeLessThan(6000);
+    expect(c.money).toBe(4000);
+    expect(c.stats.happiness).toBe(28);
+    expect(c.assets).toEqual([]);
+    expect(c.loans).toEqual([]);
   });
 });
 
@@ -1362,6 +1919,8 @@ describe('generated ids', () => {
     const c = state.character;
     c.age = 30;
     c.money = 0;
+    // A salary the borrowing cap has room inside; this is about ids, not limits.
+    c.job = job(50000);
 
     expect(takeLoan(state, REG, 10000).ok).toBe(true);
     expect(takeLoan(state, REG, 10000).ok).toBe(true);
@@ -1409,7 +1968,7 @@ describe('generated ids', () => {
     const before = c.money;
     sellAsset(state, estateId);
 
-    expect(c.money).toBe(before + 1000000);
+    expect(c.money).toBe(before + 900000);
     expect(c.assets.map((asset) => asset.label)).toEqual(['condo']);
     expect(c.loans).toEqual([mortgage]);
     expect(c.loans[0].principal).toBe(160000);
@@ -1523,8 +2082,31 @@ describe('a degree paid for on credit', () => {
     expect(c.flags.bankrupt).toBeUndefined();
     expect(c.stats.happiness).toBe(82);
     expect(c.money).toBe(0);
-    // The debt stands, with its year of interest on it and nothing paid off it.
-    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 15750, apr: 0.05 }]);
+    /* The debt stands in full, with nothing paid off it and nothing added to it:
+       an undergraduate with no cash cannot pay an instalment, and interest an
+       instalment never reached is forborne rather than capitalised. The next
+       school year adds its own tuition to this same debt. */
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 15000, apr: 0.05 }]);
+  });
+
+  it('holds the tuition of a student who is paying their own way with nothing', () => {
+    const reg = campusRegistry();
+    const { state, ctx } = undergraduate(602, reg);
+    const c = state.character;
+    // Out of the family home: nobody is keeping them, and there is no job yet.
+    c.flags.livesWithParents = false;
+
+    expect(texts(educationPhase(ctx))).toEqual(['You took a student loan.']);
+    const money = financePhase(ctx);
+
+    /* The other side of the household line drawn above. This year ends 20000
+       short with no pot, no asset and no wage, so nothing can reach the loan —
+       and tuition is not an estate to seize, so bankruptcy will not clear it
+       either. Compounding it here is what put a graduate seven figures under. */
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'student', principal: 15000, apr: 0.05 }]);
+    expect(texts(money)).toEqual([]);
+    expect(c.flags.bankrupt).toBeUndefined();
+    expect(c.money).toBe(0);
   });
 
   it('carries one debt through the degree and pays it off exactly once', () => {
@@ -1563,6 +2145,147 @@ describe('a degree paid for on credit', () => {
     expect(feed.filter((text) => text === 'You paid off your student loan.')).toEqual([
       'You paid off your student loan.',
     ]);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   Content numbers that are not numbers
+--------------------------------------------------------------------------- */
+
+/** The finance registry plus one deliberately broken def of some kind. */
+function brokenRegistry(country?: Partial<CountryDef>, asset?: Partial<AssetDef>): ContentRegistry {
+  const reg = registry();
+  if (country) {
+    const def: CountryDef = {
+      id: 'broken',
+      label: 'Broken',
+      flag: '❓',
+      costMult: 1,
+      taxMult: 1,
+      visaDifficulty: 0.5,
+      ...country,
+    };
+    reg.countries = [...reg.countries, def];
+    reg.countriesById[def.id] = def;
+  }
+  if (asset) {
+    const def: AssetDef = {
+      id: 'mystery',
+      type: 'vehicle',
+      label: 'mystery',
+      icon: '❓',
+      price: 1000,
+      upkeepPct: 0.05,
+      apprPct: -0.1,
+      ...asset,
+    };
+    reg.assets = [...reg.assets, def];
+    reg.assetsById[def.id] = def;
+  }
+  return reg;
+}
+
+function ctxIn(state: GameState, reg: ContentRegistry): Ctx {
+  return { state, c: state.character, rng: createRng(state), reg };
+}
+
+describe('a balance sheet a broken content number cannot poison', () => {
+  it('earns nothing from a salary that is not a number, rather than losing the balance', () => {
+    /* `Math.max(0, NaN)` is NaN, so a single unreadable number anywhere in the
+       year used to turn `character.money` into NaN with no way back — and from
+       there into `Loan.principal`, `netWorth`, the finance sheet and the
+       epitaph. Content packs author every one of these by hand. */
+    for (const salary of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const state = newLife(130);
+      const c = state.character;
+      c.age = 17;
+      c.money = 1000;
+      c.job = job(salary);
+
+      financePhase(ctxFor(state));
+
+      expect(c.money).toBe(1000);
+      expect(Number.isFinite(c.money)).toBe(true);
+    }
+  });
+
+  it('treats a country whose multipliers are unreadable as an ordinary one', () => {
+    const costly = newLife(131);
+    costly.character.age = 30;
+    costly.character.countryId = 'broken';
+    costly.character.flags.livesWithParents = false;
+    costly.character.money = 50000;
+    financePhase(ctxIn(costly, brokenRegistry({ costMult: Number.NaN })));
+    // Falls back to a multiplier of 1: 8000 of living plus 12000 of rent.
+    expect(costly.character.money).toBe(30000);
+
+    const taxed = newLife(132);
+    taxed.character.age = 17;
+    taxed.character.countryId = 'broken';
+    taxed.character.money = 0;
+    taxed.character.job = job(40000);
+    financePhase(ctxIn(taxed, brokenRegistry({ taxMult: Number.NaN })));
+    expect(taxed.character.money).toBe(33000);
+  });
+
+  it('holds an asset whose rates are unreadable at the value it had', () => {
+    const state = newLife(133);
+    const c = state.character;
+    c.age = 17;
+    c.money = 10000;
+    c.assets = [
+      { id: 'a1', defId: 'mystery', label: 'mystery', paid: 4000, value: 4000, yearBought: 2020 },
+    ];
+
+    financePhase(ctxIn(state, brokenRegistry(undefined, { apprPct: Number.NaN, upkeepPct: Number.NaN })));
+
+    // The same answer a missing def gets: hold the value, charge the 1% default.
+    expect(c.assets[0].value).toBe(4000);
+    expect(c.money).toBe(9960);
+    expect(netWorth(state)).toBe(13960);
+  });
+
+  it('heals a balance that arrived unreadable, and never passes it to the loans', () => {
+    /* The contagion case: a poisoned balance used to make `settleLoans` compute
+       `Math.min(principal, owed - NaN)`, so the debt went NaN too and `netWorth`
+       with it. The year now starts by healing the balance to zero, exactly as a
+       stat heals in `clampStat`. */
+    const state = newLife(134);
+    const c = state.character;
+    c.age = 17;
+    c.money = Number.NaN;
+    c.loans = [{ id: 'l1', kind: 'personal', principal: 5000, apr: 0.09 }];
+
+    financePhase(ctxFor(state));
+
+    expect(c.money).toBe(0);
+    expect(c.loans).toEqual([{ id: 'l1', kind: 'personal', principal: 5000, apr: 0.09 }]);
+    expect(netWorth(state)).toBe(-5000);
+    expect(Number.isFinite(netWorth(state))).toBe(true);
+  });
+
+  it('refuses an asset with no readable price instead of selling it for nothing', () => {
+    /* `c.money < down` is false for NaN, so the affordability gate failed
+       *open*: an unpriceable def was affordable to everyone, always, and booked
+       an asset worth NaN against a balance of NaN. */
+    for (const price of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const state = newLife(135);
+      const c = state.character;
+      c.age = 30;
+      c.money = 5000;
+      const reg = brokenRegistry(undefined, { price });
+
+      expect(buyAsset(state, reg, 'mystery')).toEqual({ ok: false, reason: 'That is not for sale.' });
+      expect(buyAsset(state, reg, 'mystery', true)).toEqual({
+        ok: false,
+        reason: 'That is not for sale.',
+      });
+      expect(c.money).toBe(5000);
+      expect(c.assets).toEqual([]);
+      expect(c.loans).toEqual([]);
+      // A refusal touches nothing at all, the happiness of a purchase included.
+      expect(c.flags.lastPurchaseJoyAge).toBeUndefined();
+    }
   });
 });
 
