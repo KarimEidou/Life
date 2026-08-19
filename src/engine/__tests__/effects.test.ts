@@ -509,6 +509,14 @@ describe('applyEffects: jail', () => {
       expect(entries).toEqual([
         { icon: '⚖️', text: 'You were convicted of Fraud, but served no time.', kind: 'legal' },
       ]);
+
+      // The sanitising happens before the write, so a sentence already being
+      // served is not overwritten with the unreadable one either.
+      const serving = makeState(
+        makeCharacter({ job: null, prison: { crime: 'Arson', yearsLeft: 2, totalYears: 5 } })
+      );
+      applyEffects(makeCtx(serving), [{ kind: 'jail', years, crime: 'Fraud' }]);
+      expect(serving.character.prison).toEqual({ crime: 'Arson', yearsLeft: 2, totalYears: 5 });
     }
   });
 
