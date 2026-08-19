@@ -9,6 +9,7 @@ interface ListRowProps {
   onClick?: () => void;
   disabled?: boolean;
   destructive?: boolean;
+  testId?: string;
 }
 
 const rowStyle: CSSProperties = {
@@ -30,10 +31,12 @@ export function ListRow({
   onClick,
   disabled,
   destructive,
+  testId,
 }: ListRowProps): ReactElement {
   return (
     <button
       type="button"
+      data-testid={testId}
       onClick={onClick}
       disabled={disabled}
       style={{

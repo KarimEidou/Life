@@ -35,6 +35,7 @@ export function TabBar({ items, activeId, onSelect, centerAction }: TabBarProps)
     <button
       key={item.id}
       type="button"
+      data-testid={`tab-${item.id}`}
       onClick={() => onSelect(item.id)}
       style={{
         ...itemStyle,
