@@ -18,9 +18,6 @@ import type {
 /** School levels that must exist exactly once so the compulsory ladder resolves. */
 const COMPULSORY_LEVELS: readonly EdLevel[] = ['primary', 'middle', 'high'];
 
-/** Levels whose `majors` list is what a `JobReq.majors` entry can be satisfied by. */
-const DEGREE_LEVELS: readonly EdLevel[] = ['university', 'postgrad'];
-
 /** One flattened collection: the merged list plus its first-wins index. */
 interface Collection<T> {
   list: T[];
@@ -172,9 +169,16 @@ function checkNumber(
 }
 
 function checkJobs(reg: ContentRegistry, problems: string[]): void {
+  /* Universities only. `SchoolDef.majors` is overloaded by level: on a postgrad
+     programme it lists the undergrad majors that programme *accepts*, which
+     `applyToSchool` matches against the degree already held. `education.major` is
+     written in one place — that same function's university branch — so a major
+     only a postgrad names can never be held, and counting it here let a job
+     requiring it validate clean while every application, at every age, for the
+     whole life, answers 'Your major does not qualify.' */
   const offered = new Set<string>();
   for (const school of reg.schools) {
-    if (!DEGREE_LEVELS.includes(school.level)) continue;
+    if (school.level !== 'university') continue;
     for (const major of school.majors ?? []) offered.add(major);
   }
 
@@ -231,9 +235,12 @@ function checkIllnessRefs(
 }
 
 /**
- * Names a delta that is not a readable number, on every effect kind that has
- * one. Only finiteness is checked: a negative delta is the ordinary way to spend
- * money, lose a stat or sour a relationship.
+ * Names a number an effect carries that is not readable: the `delta` on every
+ * kind that has one, plus a jail sentence's `years`. Only finiteness is checked:
+ * a negative delta is the ordinary way to spend money, lose a stat or sour a
+ * relationship, and `applyEffects` floors a sentence at 0 itself. What it cannot
+ * do is read an unreadable one — a NaN or Infinity `years` buys no time at all
+ * there, so the sentence the pack wrote never happens and nothing says why.
  *
  * Events are the only place effect lists can be read statically — an
  * `InteractionDef` builds its own inside `resolve` — so, exactly like
@@ -253,6 +260,11 @@ function checkEffectNumbers(
       case 'addiction':
         if (!Number.isFinite(effect.delta)) {
           problems.push(`${subject} has a ${effect.kind} delta of ${effect.delta}`);
+        }
+        break;
+      case 'jail':
+        if (!Number.isFinite(effect.years)) {
+          problems.push(`${subject} has a jail sentence of ${effect.years} years`);
         }
         break;
       default:
@@ -314,15 +326,16 @@ function checkEvents(reg: ContentRegistry, problems: string[]): void {
 
 /**
  * Returns problem list - duplicate ids registry-wide; dangling refs
- * (promotesTo, prevJobId, majors vs school majors, illness ids, countryId in
+ * (promotesTo, prevJobId, majors vs university majors, illness ids, countryId in
  * name pools); minAge<=maxAge; finite weight>0 (the predicate `rng.weighted`
  * itself applies, so Infinity and NaN are named too); every choice has >=1
  * outcome; and every number a pack authors that the engine spends, scales or
  * banks — salaries and raises, prices, upkeep and appreciation, country
  * multipliers, illness odds and costs, tuition and programme length, crime
- * payouts and sentences, and the deltas on every statically readable event
- * effect — is a readable amount rather than NaN, Infinity or a negative where
- * only a positive makes sense.
+ * payouts and sentences, interaction cooldowns, and the numbers on every
+ * statically readable event effect (each delta, and a jail sentence's years) —
+ * is a readable amount rather than NaN, Infinity or a negative where only a
+ * positive makes sense.
  */
 export function validateRegistry(reg: ContentRegistry): string[] {
   const problems: string[] = [];
@@ -341,9 +354,15 @@ export function validateRegistry(reg: ContentRegistry): string[] {
   checkEvents(reg, problems);
 
   for (const interaction of reg.interactions) {
+    /* Through `checkNumber` like every other authored number, because a bare
+       `< 0` is false for NaN and for Infinity and both are worse than a negative
+       one: `canUse` gates on `cooldown > 0`, so NaN skips the gate entirely and
+       the row becomes unlimited-use within a single year, while Infinity keeps
+       `age - lastUsedAge < cooldown` true forever — 'Too soon.' for the rest of
+       the life after one use. Neither is a metering any pack meant to author. */
     const cooldown = interaction.cooldownYears;
-    if (cooldown !== undefined && cooldown < 0) {
-      problems.push(`interaction "${interaction.id}" has negative cooldownYears ${cooldown}`);
+    if (cooldown !== undefined) {
+      checkNumber(problems, `interaction "${interaction.id}"`, 'cooldownYears', cooldown);
     }
   }
 
@@ -365,7 +384,12 @@ export function validateRegistry(reg: ContentRegistry): string[] {
   }
 
   for (const asset of reg.assets) {
-    if (!(asset.price > 0)) {
+    /* Strictly positive, so it cannot go through `checkNumber`'s `>= floor`: a
+       free asset is a bug. Finite for the reason a weight is — `Infinity > 0`
+       is true, so a bare `> 0` let an infinite price validate clean, and
+       `buyAsset` then answers 'That is not for sale.' at every balance and
+       every age while the sheet renders the row as $0. */
+    if (!(Number.isFinite(asset.price) && asset.price > 0)) {
       problems.push(`asset "${asset.id}" has price ${asset.price}`);
     }
     checkNumber(problems, `asset "${asset.id}"`, 'upkeepPct', asset.upkeepPct);

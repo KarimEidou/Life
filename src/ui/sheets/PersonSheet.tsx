@@ -2,11 +2,11 @@ import type { CSSProperties, ReactElement } from 'react';
 
 import { getRegistry } from '@/content';
 import { Avatar, Card, EmptyState, ListRow, ProgressBar } from '@/design-system';
+import { personById } from '@/engine/effects';
 import { fmtMoney } from '@/engine/format';
 import { availableInteractions } from '@/engine/interactions';
 import { useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
-import type { Person } from '@/types';
 import { gateFor } from '@/ui/lib/feed';
 import { SheetChrome } from '@/ui/sheets/SheetChrome';
 
@@ -68,8 +68,10 @@ export function PersonSheet({ sheetProps }: PersonSheetProps): ReactElement | nu
   }
 
   const personId = typeof sheetProps?.personId === 'string' ? sheetProps.personId : undefined;
-  const person =
-    personId !== undefined ? (game.people[personId] as Person | undefined) : undefined;
+  /* `personById`, never `game.people[personId]`: the id rode in on a sheet entry
+     and read back out of JSON, so an inherited member like `toString` would
+     otherwise resolve to a truthy non-person and render as one. */
+  const person = personId !== undefined ? personById(game.people, personId) : undefined;
 
   if (person === undefined) {
     return (

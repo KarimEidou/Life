@@ -91,12 +91,31 @@ const schools: SchoolDef[] = [
   },
 ];
 
+/** The age the high school diploma lands on; the education phase's own `HIGH_END`. */
+const GRADUATION_AGE = 18;
+
 /**
  * Every event below is school life, so it needs a desk to happen at. A prison
  * cell is not one: a sentence keeps the enrolment record but ends attendance.
  */
 function inSchool(ctx: Ctx): boolean {
   return ctx.c.education.enrolledIn !== undefined && !ctx.c.prison;
+}
+
+/**
+ * In school, or standing in the year high school ended.
+ *
+ * The education phase runs 3rd and the events phase 7th, so the year the diploma
+ * lands reaches the draw with the desk already emptied. A graduation-year moment
+ * gated on `inSchool` alone therefore loses that whole year and can only ever be
+ * logged before the graduation line it is written to follow. Only a graduate
+ * gets the year back: a dropout's `level` never reaches `high`, and a cell still
+ * ends attendance.
+ */
+function inSchoolOrGraduating(ctx: Ctx): boolean {
+  const c = ctx.c;
+  if (inSchool(ctx)) return true;
+  return c.age === GRADUATION_AGE && c.education.level === 'high' && !c.prison;
 }
 
 const events: EventDef[] = [
@@ -245,7 +264,8 @@ const events: EventDef[] = [
     area: 'school',
     icon: '📝',
     minAge: 14,
-    maxAge: 18,
+    // 17, not 18: the desk is empty by the time the graduation year draws.
+    maxAge: 17,
     weight: 5,
     condition: inSchool,
     text: 'The kid beside you is holding the answer key where you can read it.',
@@ -302,7 +322,8 @@ const events: EventDef[] = [
     area: 'school',
     icon: '🕺',
     minAge: 16,
-    maxAge: 18,
+    // 17, not 18: see `ev-school-cheat`.
+    maxAge: 17,
     weight: 5,
     oncePerLife: true,
     condition: inSchool,
@@ -365,7 +386,7 @@ const events: EventDef[] = [
     maxAge: 18,
     weight: 6,
     oncePerLife: true,
-    condition: (ctx) => inSchool(ctx) && ctx.c.education.gpa >= 3.8,
+    condition: (ctx) => inSchoolOrGraduating(ctx) && ctx.c.education.gpa >= 3.8,
     text: 'You were named valedictorian. You wrote the speech at 2am and it landed anyway.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 12 },
@@ -426,7 +447,7 @@ const events: EventDef[] = [
     maxAge: 18,
     weight: 5,
     oncePerLife: true,
-    condition: inSchool,
+    condition: inSchoolOrGraduating,
     text: 'You signed forty yearbooks with "stay cool, never change" and were voted Most Likely To Vanish.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 6 },

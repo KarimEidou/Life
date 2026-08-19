@@ -461,6 +461,71 @@ describe('applyEffects: jail', () => {
     const entries = applyEffects(makeCtx(state), [{ kind: 'jail', years: 1, crime: 'Theft' }]);
     expect(entries[0]?.text).toBe('You were sentenced to 1 year in prison.');
   });
+
+  it('serves no time for a zero-year sentence: no cell, and the job survives', () => {
+    // Routine, not exotic: shipped crimes carry `sentenceYears` ranges from 0.
+    const state = makeState(makeCharacter());
+    const entries = applyEffects(makeCtx(state), [
+      { kind: 'jail', years: 0, crime: 'Shoplifting' },
+    ]);
+    expect(state.character.prison).toBeNull();
+    expect(state.character.job?.title).toBe('Barista');
+    expect(state.character.flags.lastJobTitle).toBeUndefined();
+    expect(entries).toEqual([
+      {
+        icon: '⚖️',
+        text: 'You were convicted of Shoplifting, but served no time.',
+        kind: 'legal',
+      },
+    ]);
+  });
+
+  it('treats a sentence that rounds away to nothing as no time either', () => {
+    for (const years of [0.4, -3]) {
+      const state = makeState(makeCharacter());
+      applyEffects(makeCtx(state), [{ kind: 'jail', years, crime: 'Loitering' }]);
+      expect(state.character.prison).toBeNull();
+      expect(state.character.job).not.toBeNull();
+    }
+  });
+
+  it('leaves a sentence being served alone when no further time is added', () => {
+    const state = makeState(
+      makeCharacter({ job: null, prison: { crime: 'Arson', yearsLeft: 2, totalYears: 5 } })
+    );
+    applyEffects(makeCtx(state), [{ kind: 'jail', years: 0, crime: 'Loitering' }]);
+    expect(state.character.prison).toEqual({ crime: 'Arson', yearsLeft: 2, totalYears: 5 });
+  });
+
+  it('refuses an unreadable sentence instead of storing one that never ends', () => {
+    /* `careerPhase` frees a prisoner when `yearsLeft -= 1` reaches 0, and NaN
+       and Infinity never get there — storing either is a life sentence by typo,
+       and `Math.max(0, NaN)` is NaN, so the zero-year guard does not catch it. */
+    for (const years of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const state = makeState(makeCharacter());
+      const entries = applyEffects(makeCtx(state), [{ kind: 'jail', years, crime: 'Fraud' }]);
+      expect(state.character.prison).toBeNull();
+      expect(state.character.job?.title).toBe('Barista');
+      expect(entries).toEqual([
+        { icon: '⚖️', text: 'You were convicted of Fraud, but served no time.', kind: 'legal' },
+      ]);
+    }
+  });
+
+  it('caps an astronomical sentence so the yearly decrement can still end it', () => {
+    const state = makeState(makeCharacter());
+    applyEffects(makeCtx(state), [{ kind: 'jail', years: 1e300, crime: 'Treason' }]);
+    const prison = state.character.prison;
+    // Still a sentence, and still longer than the 110-year death backstop, so no
+    // sentence anyone could live to serve is shortened by the cap.
+    expect(prison?.yearsLeft).toBeGreaterThan(110);
+    expect(prison?.totalYears).toBe(prison?.yearsLeft);
+    /* Above 2^53 `yearsLeft -= 1` stops changing the number, which would make an
+       uncapped finite sentence exactly as unescapable as Infinity. Serve it. */
+    let left = prison?.yearsLeft ?? Number.POSITIVE_INFINITY;
+    for (let year = 0; year < 10_000 && left > 0; year += 1) left -= 1;
+    expect(left).toBeLessThanOrEqual(0);
+  });
 });
 
 describe('applyEffects: log', () => {

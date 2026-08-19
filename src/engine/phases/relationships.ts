@@ -2,7 +2,7 @@
  * Relationships phase: everyone else ages, drifts and occasionally leaves.
  */
 
-import { clampStat } from '@/engine/effects';
+import { clampMoney, clampStat } from '@/engine/effects';
 import type { Ctx, LogEntry, Person, RelKind } from '@/types';
 
 /** Rolled for death at any age; everyone else is only rolled once they are old. */
@@ -117,7 +117,7 @@ function rollSplit(ctx: Ctx, person: Person): LogEntry | undefined {
   const c = ctx.state.character;
   if (person.kind === 'spouse' && person.rel < DIVORCE_REL && ctx.rng.chance(DIVORCE_CHANCE)) {
     person.kind = 'ex';
-    c.money = Math.max(0, Math.round(c.money * DIVORCE_KEEP));
+    c.money = clampMoney(c.money * DIVORCE_KEEP, c.money);
     c.stats.happiness = clampStat(c.stats.happiness - DIVORCE_GRIEF);
     return { icon: '⚡', kind: 'bad', text: `${person.name} divorced you.` };
   }

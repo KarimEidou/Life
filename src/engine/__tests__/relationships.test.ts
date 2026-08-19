@@ -353,6 +353,21 @@ describe('divorce', () => {
     expect(state.character.money).toBe(10000);
   });
 
+  it('settles an unreadable balance at zero instead of carrying the poison through', () => {
+    for (const poisoned of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { state } = forceBranch(
+        () => {
+          const s = personState(28, { kind: 'spouse', rel: 15 });
+          s.character.money = poisoned;
+          return s;
+        },
+        (s) => only(s).kind === 'ex'
+      );
+
+      expect(state.character.money).toBe(0);
+    }
+  });
+
   it('does not divorce every cold marriage at once', () => {
     const fired = fireCount(
       () => personState(17, { kind: 'spouse', rel: 5 }),

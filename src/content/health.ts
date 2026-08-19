@@ -37,6 +37,13 @@ import type {
  * string in it — so nothing here trusts a flag, a stat or a severity without
  * checking what it actually is.
  *
+ * `chronic` decides whether `cureChance` is read at all: `healthPhase` gates the
+ * yearly recovery roll on `!def.chronic`, and no pack ships a
+ * `{kind:'illness', cure}` effect, so a chronic row is carried until death
+ * whatever its `cureChance` claims. The two fields have to agree — everything
+ * permanent here declares `cureChance: 0`, and anything meant to pass, however
+ * slowly, is not chronic.
+ *
  * `IllnessDef.label` carries its own article ('the flu', 'a bad back'), because
  * the engine reads it both as `You came down with ${label}.` and as
  * `You died of ${label}.`
@@ -166,7 +173,7 @@ const illnesses: IllnessDef[] = [
   {
     id: 'ill-depression',
     label: 'depression',
-    chronic: true,
+    chronic: false,
     lethality: 0.003,
     healthHit: 6,
     treatCost: 400,
@@ -255,7 +262,7 @@ const illnesses: IllnessDef[] = [
     lethality: 0.0005,
     healthHit: 3,
     treatCost: 200,
-    cureChance: 0.2,
+    cureChance: 0,
     onsetWeight: (ctx: Ctx) => {
       const c = ctx.c;
       if (c.age < 12) return 0;
@@ -265,7 +272,7 @@ const illnesses: IllnessDef[] = [
   {
     id: 'ill-back-pain',
     label: 'a bad back',
-    chronic: true,
+    chronic: false,
     lethality: 0.0005,
     healthHit: 4,
     treatCost: 500,

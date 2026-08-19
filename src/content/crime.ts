@@ -412,9 +412,15 @@ const events: EventDef[] = [
     weight: 4,
     condition: (ctx) => inside(ctx) && hasVisitor(ctx.state),
     text: 'Visiting day. Forty minutes, one plexiglass window, and a lot of nodding.',
+    /* Two sentinels, because `hasVisitor` counts six kinds and `random-family`
+       resolves only four (mother, father, sibling, child): without the second
+       row the visit a spouse or partner made would land on nobody and the gain
+       would vanish. The two can never name the same person, and `partner`
+       resolves without a draw, so the year's roll budget is unchanged. */
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 6 },
       { kind: 'rel', who: 'random-family', delta: 5 },
+      { kind: 'rel', who: 'partner', delta: 5 },
     ],
   },
   {

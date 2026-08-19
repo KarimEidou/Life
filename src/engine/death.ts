@@ -3,7 +3,7 @@
  */
 
 import { currentYearLog } from '@/engine/ageUp';
-import { clampStat, personById } from '@/engine/effects';
+import { clampMoney, clampStat, personById } from '@/engine/effects';
 import { fmtMoneyCompact } from '@/engine/format';
 import { createRng } from '@/engine/rng';
 import { addPerson, pronounsFor } from '@/engine/state';
@@ -41,7 +41,11 @@ function estateValue(state: GameState): number {
   const invested = c.investments.savings + c.investments.index + c.investments.crypto;
   const assets = c.assets.reduce((sum, a) => sum + a.value, 0);
   const debt = c.loans.reduce((sum, l) => sum + l.principal, 0);
-  return Math.round(c.money + invested + assets - debt);
+  const total = c.money + invested + assets - debt;
+  /* A balance sheet that does not add up is worth nothing rather than `NaN`:
+     `Math.max(0, NaN)` is `NaN`, so the floor the callers put under this would
+     not hold. Same guard as `content/achievements.ts`'s copy of the sum. */
+  return Number.isFinite(total) ? Math.round(total) : 0;
 }
 
 function aliveChildren(state: GameState): Person[] {
@@ -174,7 +178,7 @@ export function startLegacy(
     countryId: previous.countryId,
     age: heir.age,
     stats,
-    money: inheritance,
+    money: clampMoney(inheritance),
     education: heirEducation(reg, heir.age, stats.smarts),
     job: null,
     prison: null,

@@ -7,6 +7,7 @@ import type {
   EventDef,
   GameState,
   Person,
+  YearLog,
 } from '@/types';
 
 /**
@@ -18,13 +19,13 @@ import type {
  * nothing here applies for anything. This pack is the flavour that hangs off
  * having gone, and every card is gated on `abroad`.
  *
- * That gate is deliberately not just "has a visa stamp". `lastVisaAge` is
- * written whether the application was approved or refused, so a character who
- * paid $2,000 and stayed exactly where they were would otherwise start missing
- * food they never left behind. The birth line the log opens with names the
- * country the life began in, which is the one record of the move the engine
- * keeps; where that line is missing — a legacy heir's log opens differently —
- * the stamp is all there is to go on, and the pack takes it.
+ * That gate is deliberately not "has a visa stamp". `lastVisaAge` is written
+ * whether the application was approved or refused, so a character who paid
+ * $2,000 and stayed exactly where they were would otherwise start missing food
+ * they never left behind. The record of an approved move is the line the engine
+ * logs on success, so `abroad` reads the log for that: a refusal leaves nothing
+ * behind to find, and a legacy heir — whose log opens with a different sentence
+ * and who inherits no stamp — is held to the same evidence as everyone else.
  */
 
 /* ------------------------------------------------------------------ */
@@ -46,17 +47,40 @@ function yearsSinceVisa(c: Character): number {
   return Number.isFinite(since) && since > 0 ? since : 0;
 }
 
+/** The line `emigrateTo` logs when a visa lands, and only then. */
+const MOVED_PREFIX = 'You moved to ';
+
+/** True once the engine has actually moved this life to another country. */
+function everMoved(state: GameState): boolean {
+  /* Widened as in `alivePeople`: this walks a loaded save's whole log from
+     inside an event condition, where a throw would strand a half-run year. */
+  const years: (YearLog | undefined)[] = state.log;
+  for (const year of years) {
+    for (const entry of year?.entries ?? []) {
+      const text: unknown = entry?.text;
+      if (typeof text === 'string' && text.startsWith(MOVED_PREFIX)) return true;
+    }
+  }
+  return false;
+}
+
 /** True once the life is being lived somewhere other than where it opened. */
 function abroad(ctx: Ctx): boolean {
   const c = ctx.c;
   if (c.prison !== null) return false;
   if (c.flags['emigration:done'] === true) return true;
-  if (visaAge(c) === undefined) return false;
+  if (!everMoved(ctx.state)) return false;
+  /* Home again. The birth line is the only record of where a life opened, so
+     only generation 1 can be back — an heir's log opens with another sentence
+     and names no birthplace. The country slot is matched whole: `includes`
+     would read a character surnamed `France` who moved to France as never
+     having left. */
   const label = typeof c.flags.countryLabel === 'string' ? c.flags.countryLabel : '';
   const opening = ctx.state.log[0]?.entries[0]?.text ?? '';
-  // No birth line to compare against: the stamp is the only evidence there is.
-  if (label === '' || !opening.startsWith('You were born')) return true;
-  return !opening.includes(label);
+  if (label !== '' && opening.startsWith('You were born') && opening.endsWith(` in ${label}.`)) {
+    return false;
+  }
+  return true;
 }
 
 /** Abroad, and still inside the first `n` years of it. */

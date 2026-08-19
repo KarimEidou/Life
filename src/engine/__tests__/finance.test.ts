@@ -301,6 +301,79 @@ describe('living costs', () => {
     expect(state.character.money).toBe(89940);
   });
 
+  it('still counts a home whose def this build no longer ships', () => {
+    /* The save was written when the def was called `condo`; the id has been
+       reorganised since. The asset is still owned — it is still revalued, still
+       billed upkeep and still counted by `netWorth` — so it is still a home, and
+       charging rent on top billed the character for a roof they own, every year
+       for the rest of the life. */
+    const state = newLife(136);
+    state.character.age = 30;
+    state.character.flags.livesWithParents = false;
+    state.character.money = 100000;
+    state.character.assets = [
+      {
+        id: 'a1-30',
+        defId: 'prop-condo',
+        label: 'condo',
+        paid: 200000,
+        value: 200000,
+        yearBought: 2020,
+      },
+    ];
+
+    financePhase(ctxFor(state));
+
+    // A missing def holds its value and pays the 1% default: 8000 plus 2000, no rent.
+    expect(state.character.assets[0].value).toBe(200000);
+    expect(state.character.money).toBe(90000);
+  });
+
+  it('moves a homeowner out even when their def has left the registry', () => {
+    const state = newLife(137);
+    state.character.age = 19;
+    state.character.money = 50000;
+    state.character.assets = [
+      {
+        id: 'a1-19',
+        defId: 'prop-condo',
+        label: 'condo',
+        paid: 200000,
+        value: 200000,
+        yearBought: 2020,
+      },
+    ];
+
+    const entries = financePhase(ctxFor(state));
+
+    expect(state.character.flags.livesWithParents).toBe(false);
+    expect(texts(entries)).toEqual(['You moved out on your own.']);
+    // 8000 of living costs and 2000 of upkeep; a homeowner pays no rent.
+    expect(state.character.money).toBe(40000);
+  });
+
+  it('does not mistake a vehicle whose def has left the registry for a home', () => {
+    const state = newLife(138);
+    state.character.age = 30;
+    state.character.flags.livesWithParents = false;
+    state.character.money = 100000;
+    state.character.assets = [
+      {
+        id: 'a1-30',
+        defId: 'veh-sedan',
+        label: 'sedan',
+        paid: 20000,
+        value: 20000,
+        yearBought: 2020,
+      },
+    ];
+
+    financePhase(ctxFor(state));
+
+    // 8000 of living costs, 12000 of rent and the 1% default upkeep on 20000.
+    expect(state.character.money).toBe(79800);
+  });
+
   it('charges 6000 a year for every child still under 18', () => {
     const state = newLife(12);
     state.character.age = 40;
@@ -2286,6 +2359,54 @@ describe('a balance sheet a broken content number cannot poison', () => {
       // A refusal touches nothing at all, the happiness of a purchase included.
       expect(c.flags.lastPurchaseJoyAge).toBeUndefined();
     }
+  });
+
+  it('gates an asset whose minimum age is unreadable at the family default', () => {
+    /* `??` answers for an absent minAge only, and `c.age < NaN` is false at
+       every age, so the age gate failed *open*: a three-year-old heir could buy
+       a villa, and the refusal it never printed read "You must be NaN to buy
+       that." */
+    for (const minAge of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const vehicle = newLife(139);
+      const child = vehicle.character;
+      child.age = 3;
+      child.money = 5000;
+      const cars = brokenRegistry(undefined, { minAge });
+
+      expect(buyAsset(vehicle, cars, 'mystery')).toEqual({
+        ok: false,
+        reason: 'You must be 16 to buy that.',
+      });
+      expect(child.money).toBe(5000);
+      expect(child.assets).toEqual([]);
+      expect(child.flags.lastPurchaseJoyAge).toBeUndefined();
+      // The gate is the family's, not a closed door: the same def sells at 16.
+      child.age = 16;
+      expect(buyAsset(vehicle, cars, 'mystery')).toEqual({ ok: true });
+
+      const property = newLife(140);
+      const heir = property.character;
+      heir.age = 3;
+      heir.money = 5000;
+      const villas = brokenRegistry(undefined, { type: 'property', minAge });
+
+      expect(buyAsset(property, villas, 'mystery')).toEqual({
+        ok: false,
+        reason: 'You must be 18 to buy that.',
+      });
+      expect(heir.assets).toEqual([]);
+      heir.age = 18;
+      expect(buyAsset(property, villas, 'mystery')).toEqual({ ok: true });
+    }
+  });
+
+  it('keeps a minimum age of zero, which is a readable number and not an absent one', () => {
+    const state = newLife(141);
+    state.character.age = 3;
+    state.character.money = 5000;
+    expect(buyAsset(state, brokenRegistry(undefined, { minAge: 0 }), 'mystery')).toEqual({
+      ok: true,
+    });
   });
 });
 

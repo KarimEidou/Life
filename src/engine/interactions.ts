@@ -50,10 +50,20 @@ function findCrime(reg: ContentRegistry, id: string): CrimeDef | undefined {
   return byId[id];
 }
 
-/** Price of one use, rounded to whole money and never negative. */
+/**
+ * Price of one use, rounded to whole money and never negative.
+ *
+ * A price that is not a readable amount is reported as infinite, i.e.
+ * unaffordable — never free. `Math.max(0, NaN)` is NaN and an infinite price
+ * passes every `> 0` test, so both used to price the row at $0: the wallet check
+ * waved it through, `runInteraction` charged nothing and the sheet showed no
+ * price, which made an item priced beyond what the game can express the cheapest
+ * thing in it. This is the price twin of `clampMoney`, which keeps the balance it
+ * cannot read rather than storing it — an unreadable number buys nothing.
+ */
 function costOf(ctx: Ctx, def: InteractionDef): number {
   const raw = typeof def.cost === 'function' ? def.cost(ctx) : def.cost ?? 0;
-  return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0;
+  return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : Number.POSITIVE_INFINITY;
 }
 
 /** Death protocol: effects only mark a death, the obituary is settled here. */
@@ -71,9 +81,10 @@ function settleDeath(state: GameState, reg: ContentRegistry): void {
  * is the number the caller must charge. `def.cost` may be a function, and a
  * priced function may draw from `ctx.rng`, so asking for the price a second
  * time would bill an amount this gate never validated — and burn a second draw.
- * `cost` is absent only when an earlier gate refused before the price was ever
- * needed: nothing runs then, so nothing is charged. `runInteraction` must
- * charge `gate.cost` rather than re-pricing the def.
+ * `cost` is absent when an earlier gate refused before the price was ever
+ * needed, and on the refusal of a price too unreadable to quote: nothing runs in
+ * either case, so nothing is charged. `runInteraction` must charge `gate.cost`
+ * rather than re-pricing the def.
  *
  * Draw budget: **asking is always free.** Both `condition` and `cost` may draw,
  * so the cursor is rewound before *every* return, refusal and approval alike —
@@ -130,6 +141,10 @@ export function canUse(
   }
 
   const cost = costOf(ctx, def);
+  /* Refused before the balance is even consulted, and quoted to nobody: an
+     unreadable price is no quote, and `fmtMoney` renders one as "$0" — the free
+     row this refusal exists to prevent, printed on the row that refused it. */
+  if (!Number.isFinite(cost)) return refuse("You can't afford it.");
   if (c.money < cost) return refuse("You can't afford it.", cost);
 
   // Rewound like every other exit; the spent cursor goes back as data instead.
@@ -266,13 +281,24 @@ export function commitCrime(
     return { text, icon: def.icon, entries };
   }
 
+  /* Guarded like the payout above, and against a worse outcome: `rng.int` hands
+     back NaN for a NaN bound and Infinity for an infinite one (the draw is
+     spent either way, so the sequence is unaffected), and `careerPhase` serves
+     a sentence by subtracting a year until `yearsLeft <= 0` — a bound neither
+     one ever reaches. An unreadable term is no term: a conviction with no time
+     to serve, rather than a cell with no exit. */
   const rolled = rng.int(def.sentenceYears[0], def.sentenceYears[1]);
+  const sentence = Number.isFinite(rolled) ? rolled : 0;
   const convictions = Number(c.flags.convictions ?? 0);
   const priors = Number.isFinite(convictions) && convictions > 0 ? convictions : 0;
-  const years = priors > 0 ? Math.round(rolled * REPEAT_OFFENDER_MULT) : rolled;
+  const years = priors > 0 ? Math.round(sentence * REPEAT_OFFENDER_MULT) : sentence;
 
   const text = `GUILTY. ${def.label}.`;
-  // The headline lands before the sentencing line `applyEffects` produces.
+  /* The headline lands before the line `applyEffects` writes for the term. That
+     line is a cell only when there is time to serve — a term of no years is a
+     conviction, not a jailing, which is half of every conviction on a crime
+     whose `sentenceYears` start at 0 — and that rule stays at the one place a
+     `PrisonState` is built rather than being restated here. */
   const entries: LogEntry[] = [{ icon: def.icon, kind: 'legal', text }];
   const punishment: Effect[] = [
     { kind: 'jail', years, crime: def.label },

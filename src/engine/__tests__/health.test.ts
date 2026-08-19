@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { clampStat } from '@/engine/effects';
 import { healthPhase } from '@/engine/phases/health';
 import { createRng, initialRngState } from '@/engine/rng';
-import type { Character, ContentRegistry, Ctx, GameState, IllnessDef } from '@/types';
+import type { Character, ContentRegistry, Ctx, GameState, IllnessDef, LogEntry } from '@/types';
 
 // Hand-rolled fixtures: `createLife` and `buildRegistry` belong to other modules.
 function emptyRegistry(): ContentRegistry {
@@ -48,10 +48,13 @@ function makeIllness(over: Partial<IllnessDef> = {}): IllnessDef {
   };
 }
 
+/* Indexed the way `buildRegistry` indexes: every def stays in the list, but a
+   duplicate id keeps the FIRST declaration in the map. */
 function registryWith(illnesses: IllnessDef[]): ContentRegistry {
   const reg = emptyRegistry();
   reg.illnesses = illnesses;
-  for (const def of illnesses) reg.illnessesById[def.id] = def;
+  const byId: Record<string, IllnessDef | undefined> = reg.illnessesById;
+  for (const def of illnesses) byId[def.id] ??= def;
   return reg;
 }
 
@@ -154,6 +157,139 @@ describe('healthPhase onset', () => {
     // The onset hit only: 80 - 20, never a further 20 / 2 of progression.
     expect(state.character.stats.health).toBe(60);
     expect(state.character.illnesses[0]?.years).toBe(0);
+  });
+
+  /* Shipped onset weights multiply themselves by a comorbidity the character
+     holds ('a stroke' triples on high blood pressure) and by how low health has
+     fallen. Committing a catch before the rest of the registry has rolled would
+     hand it those multipliers in the very year the cause appeared, a year before
+     the character could treat anything — and would make them depend on where the
+     def happens to sit in the list. Every onset is rolled against the state the
+     year started in. */
+  it('rolls a comorbidity against start-of-year state, so it cannot fire the year its cause appears', () => {
+    const reg = registryWith([
+      // A small hit keeps the second year clear of the "seriously ill" warning.
+      makeIllness({
+        id: 'bp',
+        label: 'high blood pressure',
+        onsetWeight: () => 1,
+        healthHit: 5,
+        cureChance: 0,
+      }),
+      makeIllness({
+        id: 'stroke',
+        label: 'a stroke',
+        healthHit: 25,
+        cureChance: 0,
+        onsetWeight: (ctx) => (ctx.c.illnesses.some((held) => held.defId === 'bp') ? 1 : 0),
+      }),
+    ]);
+    const state = makeState();
+
+    const first = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([{ defId: 'bp', years: 0, treated: false }]);
+    expect(first).toEqual([
+      { icon: '🤒', kind: 'health', text: 'You came down with high blood pressure.' },
+    ]);
+
+    // The raised risk is real, it just starts accruing from the following year.
+    const second = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses.map((illness) => illness.defId)).toEqual(['bp', 'stroke']);
+    expect(second).toEqual([{ icon: '🤒', kind: 'health', text: 'You came down with a stroke.' }]);
+  });
+
+  it('shows a later onset the health it started the year with, not what an earlier one docked', () => {
+    const seen: number[] = [];
+    const reg = registryWith([
+      makeIllness({ id: 'bone', label: 'a broken bone', onsetWeight: () => 1, healthHit: 30 }),
+      makeIllness({
+        id: 'pneumonia',
+        label: 'pneumonia',
+        onsetWeight: (ctx) => {
+          seen.push(ctx.c.stats.health);
+          return 0;
+        },
+      }),
+    ]);
+    const state = makeState();
+
+    healthPhase(makeCtx(state, reg));
+
+    expect(seen).toEqual([80]);
+    // The hit still lands, just once every roll of the year is in.
+    expect(state.character.stats.health).toBe(50);
+  });
+
+  it('gives the same year whichever order the registry lists cause and consequence in', () => {
+    const cause = makeIllness({
+      id: 'bp',
+      label: 'high blood pressure',
+      onsetWeight: () => 1,
+      cureChance: 0,
+    });
+    const consequence = makeIllness({
+      id: 'stroke',
+      label: 'a stroke',
+      cureChance: 0,
+      onsetWeight: (ctx) => (ctx.c.illnesses.some((held) => held.defId === 'bp') ? 1 : 0),
+    });
+    const run = (defs: IllnessDef[]): string[] => {
+      const state = makeState();
+      healthPhase(makeCtx(state, registryWith(defs)));
+      return state.character.illnesses.map((illness) => illness.defId);
+    };
+
+    expect(run([cause, consequence])).toEqual(['bp']);
+    expect(run([consequence, cause])).toEqual(['bp']);
+  });
+
+  it('commits every catch of the year, in registry order and on one roll each', () => {
+    const reg = registryWith([
+      makeIllness({ id: 'flu', label: 'the flu', onsetWeight: () => 1, healthHit: 5 }),
+      makeIllness({ id: 'gout', label: 'gout', onsetWeight: () => 1, healthHit: 8 }),
+    ]);
+    const state = makeState();
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([
+      { defId: 'flu', years: 0, treated: false },
+      { defId: 'gout', years: 0, treated: false },
+    ]);
+    expect(state.character.stats.health).toBe(67);
+    expect(entries).toEqual([
+      { icon: '🤒', kind: 'health', text: 'You came down with the flu.' },
+      { icon: '🤒', kind: 'health', text: 'You came down with gout.' },
+    ]);
+    // Two onset rolls and nothing else: neither fresh row rolls its own recovery.
+    const mirror = { rngState: initialRngState(SEED) };
+    const rng = createRng(mirror);
+    rng.chance(1);
+    rng.chance(1);
+    expect(state.rngState).toBe(mirror.rngState);
+  });
+
+  /* `buildRegistry` appends every duplicate id to the flat list — that is what
+     lets `validateRegistry` name the offending pack — and nothing runs that lint
+     at load time, so two packs shipping the same illness reach this loop as two
+     entries. The second one is a copy of a condition the character now holds. */
+  it('contracts an illness once when two packs declare the same id', () => {
+    const flu = makeIllness({ id: 'flu', label: 'the flu', onsetWeight: () => 1 });
+    const reg = registryWith([flu, makeIllness({ ...flu, healthHit: 30 })]);
+    const state = makeState();
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([{ defId: 'flu', years: 0, treated: false }]);
+    // One hit, from the def that caught it; the duplicate's 30 is never paid.
+    expect(state.character.stats.health).toBe(60);
+    expect(entries).toEqual([{ icon: '🤒', kind: 'health', text: 'You came down with the flu.' }]);
+    // And skipped draw-free, exactly as an illness carried in from last year is.
+    const mirror = { rngState: initialRngState(SEED) };
+    createRng(mirror).chance(1);
+    expect(state.rngState).toBe(mirror.rngState);
   });
 });
 
@@ -441,6 +577,55 @@ describe('healthPhase addictions', () => {
     const second = healthPhase(makeCtx(state, reg));
     expect(c.addictions.gambling).toBe(54);
     expect(second).toEqual([]);
+  });
+
+  /* Severity also moves through `{kind:'addiction'}` effects, and every one of
+     them — an event, a choice, an interaction — lands later in the year than
+     this phase. A warning that only compared this year's severity with last
+     year's would miss those crossings for good: by the next health phase the
+     addiction is already past the alarm, so the one line the game has for it
+     would never print. */
+  it('warns about a crossing that happened outside the phase', () => {
+    const reg = emptyRegistry();
+    // Grew to 48 here last year without a word, then a night at the casino.
+    const state = makeState({ addictions: { gambling: 53 } });
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.addictions.gambling).toBe(56);
+    expect(entries).toEqual([
+      { icon: '🎰', kind: 'bad', text: 'Your gambling addiction is taking over your life.' },
+    ]);
+    // Once, not every year after — and without spending a draw on any of it.
+    expect(healthPhase(makeCtx(state, reg))).toEqual([]);
+    expect(state.rngState).toBe(initialRngState(SEED));
+  });
+
+  it('warns again about a habit beaten back under the alarm and picked up anew', () => {
+    const alarm: LogEntry = {
+      icon: '🚬',
+      kind: 'bad',
+      text: 'Your smoking addiction is taking over your life.',
+    };
+    const reg = emptyRegistry();
+    const state = makeState({ addictions: { smoking: 48 } });
+    const c = state.character;
+
+    expect(healthPhase(makeCtx(state, reg))).toEqual([alarm]);
+
+    // Cutting down is enough to re-arm it: the line is about crossing the alarm.
+    c.addictions.smoking = 20;
+    expect(healthPhase(makeCtx(state, reg))).toEqual([]);
+    c.addictions.smoking = 48;
+    expect(healthPhase(makeCtx(state, reg))).toEqual([alarm]);
+
+    /* And so is quitting, which `applyEffects` records by dropping the key —
+       even when the relapse arrives from effects alone and is already over the
+       alarm before this phase ever sees it again. */
+    delete c.addictions.smoking;
+    expect(healthPhase(makeCtx(state, reg))).toEqual([]);
+    c.addictions.smoking = 55;
+    expect(healthPhase(makeCtx(state, reg))).toEqual([alarm]);
   });
 
   it('stays quiet while an addiction is still mild', () => {

@@ -347,6 +347,26 @@ describe('startLegacy', () => {
     expect(startLegacy(state, reg, children[0].id).character.money).toBe(0);
   });
 
+  it('inherits nothing from an estate that does not add up', () => {
+    /* Nothing validates the numbers a save or a pack delivers, so a balance
+       sheet can arrive holding `NaN` or `Infinity`. `Math.max(0, NaN)` is NaN,
+       so an unguarded split would open the next life on a wallet that is not a
+       number — and every affordability test against it inverts. */
+    const reg = emptyRegistry();
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const state = life(reg, 60, 2060);
+      state.character.money = 100000;
+      state.character.assets = [
+        { id: 'a1', defId: 'house', label: 'House', paid: 0, value, yearBought: 2050 },
+      ];
+      const heir = addChild(state, 'Nina Byron', 30);
+      killCharacter(state, reg, 'old age');
+
+      expect(state.death?.epitaphStats.netWorth).toBe(0);
+      expect(startLegacy(state, reg, heir.id).character.money).toBe(0);
+    }
+  });
+
   it('rebuilds the family around the heir', () => {
     const reg = emptyRegistry();
     const { state, children } = estate(reg, { ages: [10, 8, 6], spouse: true });

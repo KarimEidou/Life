@@ -273,6 +273,38 @@ describe('educationPhase grades', () => {
     }
   });
 
+  it('never records the 0.00 that the admission gate reads as an ungraded transcript', () => {
+    /* The roll used to clamp at 0, and the noise term reaches it — seed 341 does
+       so at the lowest smarts `createLife` can hand out, with no content damage
+       at all. That collided with `gpaTooLow`'s "never graded" sentinel and made
+       the refusal non-monotonic: a 0.01 transcript was turned away from a 2.0
+       minimum and a 0.00 one, strictly worse, was admitted. */
+    const state = makeState(
+      {
+        age: 17,
+        stats: { health: 80, happiness: 60, smarts: 10, looks: 50 },
+        education: { level: 'middle', enrolledIn: 'hs', year: 0, gpa: 0, studyHard: false },
+      },
+      341
+    );
+    const reg = makeRegistry();
+
+    educationPhase(makeCtx(state, reg));
+
+    expect(state.character.education.gpa).toBe(0.01);
+
+    // The graduation year empties the desk before grading, so that roll stands.
+    state.character.age = 18;
+    educationPhase(makeCtx(state, reg));
+
+    expect(state.character.education.level).toBe('high');
+    expect(state.character.education.gpa).toBe(0.01);
+    expect(applyToSchool(state, reg, 'uni', 'cs')).toEqual({
+      ok: false,
+      reason: 'Your GPA is too low.',
+    });
+  });
+
   it('does not grade a year spent out of school', () => {
     const state = makeState({
       age: 30,
@@ -473,6 +505,22 @@ describe('degree years', () => {
     expect(state.character.loans).toEqual([]);
     expect(state.character.education.year).toBe(1);
     expect(entries).toEqual([]);
+  });
+
+  it('settles a balance that is already unreadable', () => {
+    /* A poisoned balance clears the affordability guard — `Infinity >= 15000` —
+       so the tuition debit is the write that has to heal it. Writing it as
+       `Math.max(0, Math.round(money - tuition))` handed the `Infinity` straight
+       back, year after year, and the HUD, the finance sheet, `netWorth` and the
+       epitaph all quoted it. See `clampMoney`'s own comment. */
+    const state = student({ money: Number.POSITIVE_INFINITY });
+
+    educationPhase(makeCtx(state, makeRegistry()));
+
+    expect(state.character.money).toBe(0);
+    // The cash branch is the one that ran, so no debt was minted either.
+    expect(state.character.loans).toEqual([]);
+    expect(state.character.education.year).toBe(1);
   });
 
   it('takes a student loan when tuition is unaffordable and says so once', () => {

@@ -381,11 +381,33 @@ describe('validateRegistry', () => {
     );
   });
 
-  it('accepts a major offered by a postgrad programme', () => {
+  it('reports a required major that only a postgrad programme lists', () => {
+    /* A postgrad `majors` list is the undergrad majors it *accepts*, not a
+       curriculum, and `applyToSchool` writes `education.major` only for a
+       university — so nobody can ever hold 'Physics' and the job is unearnable.
+       Counting the postgrad list as offered made this lint say the pack was clean. */
     const reg = buildRegistry([
       pack('mix', {
         jobs: [job({ id: 'prof', req: { majors: ['Physics'] } })],
         schools: [...ladder(), school({ id: 'phd', level: 'postgrad', years: 4, majors: ['Physics'] })],
+      }),
+    ]);
+
+    expect(validateRegistry(reg)).toContain(
+      'job "prof" requires major "Physics" that no university offers'
+    );
+  });
+
+  it('accepts a major a university teaches and a postgrad programme also accepts', () => {
+    // The shipped shape: a postgrad-gated job asking for the undergrad major its programme takes.
+    const reg = buildRegistry([
+      pack('mix', {
+        jobs: [job({ id: 'doctor', req: { education: 'postgrad', majors: ['biology'] } })],
+        schools: [
+          ...ladder(),
+          school({ id: 'uni', level: 'university', years: 4, majors: ['biology'] }),
+          school({ id: 'med', level: 'postgrad', years: 4, majors: ['biology'] }),
+        ],
       }),
     ]);
 
@@ -571,7 +593,111 @@ describe('validateRegistry', () => {
     const problems = validateRegistry(reg);
     expect(problems).toContain('crime "heist" has a reversed sentenceYears range');
     expect(problems).toContain('asset "freebie" has price 0');
-    expect(problems).toContain('interaction "nap" has negative cooldownYears -1');
+    expect(problems).toContain('interaction "nap" has cooldownYears -1');
+  });
+
+  it('reports an unreadable cooldown on an interaction', () => {
+    /* `NaN < 0` and `Infinity < 0` are both false, so the old gate passed the
+       two values that break the cooldown worst: `canUse` tests `cooldown > 0`,
+       which NaN fails, dropping the gate entirely — the row is unlimited-use
+       inside one year — while Infinity keeps `age - lastUsedAge < cooldown`
+       true for the rest of the life after a single use. */
+    const reg = buildRegistry([
+      pack('misc', {
+        interactions: [
+          interaction({ id: 'unmetered', cooldownYears: Number.NaN }),
+          interaction({ id: 'once-ever', cooldownYears: Number.POSITIVE_INFINITY }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('interaction "unmetered" has cooldownYears NaN');
+    expect(problems).toContain('interaction "once-ever" has cooldownYears Infinity');
+  });
+
+  it('leaves an ordinary cooldown alone, including none at all and zero', () => {
+    // Widened, not tightened: a metered row and an unmetered one both validate clean.
+    const reg = buildRegistry([
+      pack('misc', {
+        interactions: [
+          interaction({ id: 'spa', cooldownYears: 3 }),
+          interaction({ id: 'walk', cooldownYears: 0 }),
+          interaction({ id: 'read' }),
+        ],
+      }),
+    ]);
+    expect(validateRegistry(reg)).toEqual([]);
+  });
+
+  it('names a jail sentence of no readable length on an event and on an outcome', () => {
+    /* `applyEffects` answers an unreadable sentence with no time served, so the
+       cell the pack authored never happens and nothing else says why. */
+    const reg = buildRegistry([
+      pack('misc', {
+        events: [
+          event({ id: 'raid', effects: [{ kind: 'jail', years: Number.NaN, crime: 'Fraud' }] }),
+          event({
+            id: 'trial',
+            choices: [
+              {
+                label: 'Plead',
+                outcomes: [
+                  {
+                    weight: 1,
+                    text: 'Guilty.',
+                    effects: [{ kind: 'jail', years: Number.POSITIVE_INFINITY, crime: 'Treason' }],
+                  },
+                ],
+              },
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('event "raid" has a jail sentence of NaN years');
+    expect(problems).toContain(
+      'event "trial" choice "Plead" outcome 0 has a jail sentence of Infinity years'
+    );
+  });
+
+  it('leaves an ordinary jail sentence alone', () => {
+    const reg = buildRegistry([
+      pack('misc', {
+        events: [event({ id: 'raid', effects: [{ kind: 'jail', years: 2, crime: 'Fraud' }] })],
+      }),
+    ]);
+    expect(validateRegistry(reg)).toEqual([]);
+  });
+
+  it('reports a non-finite asset price', () => {
+    /* `Infinity > 0` is true, so a bare `> 0` gate validated an infinite price
+       clean while `buyAsset` refuses it — 'That is not for sale.' at every
+       balance and every age — and the sheet renders the row as $0. NaN and
+       -Infinity already failed the old gate; they are pinned so the whole
+       family stays named. */
+    const reg = buildRegistry([
+      pack('misc', {
+        assets: [
+          asset({ id: 'endless', price: Number.POSITIVE_INFINITY }),
+          asset({ id: 'nan-price', price: Number.NaN }),
+          asset({ id: 'backwards-infinite', price: Number.NEGATIVE_INFINITY }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('asset "endless" has price Infinity');
+    expect(problems).toContain('asset "nan-price" has price NaN');
+    expect(problems).toContain('asset "backwards-infinite" has price -Infinity');
+  });
+
+  it('leaves an ordinary finite price alone', () => {
+    // The predicate was widened, not tightened: priced content still validates clean.
+    const reg = buildRegistry([pack('misc', { assets: [asset({ price: 20000 })] })]);
+    expect(validateRegistry(reg)).toEqual([]);
   });
 
   it('requires exactly one school per compulsory level once any school exists', () => {

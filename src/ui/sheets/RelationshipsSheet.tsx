@@ -1,9 +1,13 @@
 import type { CSSProperties, ReactElement } from 'react';
 
-import { Avatar, EmptyState, ProgressBar, SectionHeader } from '@/design-system';
+import { getRegistry } from '@/content';
+import { Avatar, EmptyState, ListRow, ProgressBar, SectionHeader } from '@/design-system';
+import { fmtMoney } from '@/engine/format';
+import { availableInteractions } from '@/engine/interactions';
 import { useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
 import type { Person, RelKind } from '@/types';
+import { gateFor } from '@/ui/lib/feed';
 import { SheetChrome } from '@/ui/sheets/SheetChrome';
 
 /* Fixed section order; a person appears under the first section listing their kind. */
@@ -58,6 +62,10 @@ const chevronStyle: CSSProperties = {
   color: 'var(--label-3)',
 };
 
+const gatedStyle: CSSProperties = {
+  opacity: 0.55,
+};
+
 /** One tappable person row: face, name, kind and the relationship meter. */
 function PersonRow({ person }: { person: Person }): ReactElement {
   const subtitle = `Age ${person.age} · ${person.kind}${person.alive ? '' : ' · Deceased'}`;
@@ -98,6 +106,17 @@ export function RelationshipsSheet(): ReactElement | null {
     kinds.flatMap((kind) => people.filter((p) => p.kind === kind)),
   ]).filter(([, members]) => members.length > 0);
 
+  /* Relationship rows normally live on a person's sheet, which needs somebody
+     alive to open. The handful that *mint* a person instead — Make a Friend,
+     Start Dating, Adopt — would then be unreachable for the rest of the life,
+     so the area's hub hosts them once nobody is left: an orphaned heir starts
+     with an empty table, and a life outlives everybody in it. The list is
+     exactly those rows here, because every person-targeted condition answers
+     false with nobody alive to aim at. */
+  const reg = getRegistry();
+  const alone = !people.some((p) => p.alive);
+  const meet = alone ? availableInteractions(game, reg, 'relationship') : [];
+
   return (
     <SheetChrome id="relationships" title="Relationships">
       {groups.length === 0 ? (
@@ -114,6 +133,37 @@ export function RelationshipsSheet(): ReactElement | null {
           </div>
         ))
       )}
+
+      {meet.length > 0 ? (
+        <div>
+          <SectionHeader>Meet Someone</SectionHeader>
+          <div style={listGroupStyle}>
+            {meet.map((def) => {
+              const gate = gateFor(game, reg, def);
+              return (
+                // Gated rows dim but stay tappable; the engine refuses with a headline.
+                <div key={def.id} style={gate.ok ? undefined : gatedStyle}>
+                  <ListRow
+                    testId={`rel-action-${def.id}`}
+                    icon={def.icon}
+                    title={def.label}
+                    subtitle={gate.ok ? undefined : gate.reason}
+                    value={
+                      gate.cost !== undefined && gate.cost > 0 ? fmtMoney(gate.cost) : undefined
+                    }
+                    onClick={() => {
+                      const r = useGameStore.getState().interact(def.id);
+                      if (r !== null) {
+                        useUiStore.getState().addToast({ icon: r.icon, title: r.text });
+                      }
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
     </SheetChrome>
   );
 }

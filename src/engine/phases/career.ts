@@ -8,7 +8,7 @@
  */
 
 import { currentYearLog } from '@/engine/ageUp';
-import { clampStat } from '@/engine/effects';
+import { clampMoney, clampStat } from '@/engine/effects';
 import { createRng } from '@/engine/rng';
 import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
@@ -99,6 +99,24 @@ function counter(value: boolean | number | string | undefined): number {
 }
 
 /**
+ * A rate or salary read straight out of content, with `fallback` for anything
+ * that is not a readable number — the career side of the guard the finance
+ * phase puts on every pack number it reads.
+ *
+ * A pack is playable unvalidated, and this is the module an unreadable number
+ * would be minted by: it is the only writer of `JobState.salary`, so one NaN
+ * `raisePct` makes the salary NaN for the rest of the life and every later read
+ * — the raise, the severance, the loan cap, the pension — is downstream of it.
+ * Worse, the two reads that fold a content number into something the character
+ * has already banked destroy it rather than skip it: `Math.max(pension, NaN)`
+ * is NaN and `clampStat(fame + NaN)` is 0. A broken number must buy nothing,
+ * not take something away.
+ */
+function contentNumber(n: number, fallback: number): number {
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
  * Rolls the yearly promotion. Only a job whose def names a `promotesTo` rung can
  * climb, which is what keeps part-time work a dead end.
  */
@@ -118,13 +136,18 @@ function rollPromotion(ctx: Ctx, def: JobDef): LogEntry | undefined {
   if (!ctx.rng.chance(odds)) return undefined;
 
   // Never a pay cut: the rung's base salary is a floor, not a reset.
-  job.salary = Math.max(Math.round(job.salary * PROMOTION_RAISE), Math.round(next.baseSalary));
+  job.salary = Math.max(
+    Math.round(job.salary * PROMOTION_RAISE),
+    Math.round(contentNumber(next.baseSalary, 0))
+  );
   job.jobId = next.id;
   job.title = next.title;
   job.years = 0;
   job.performance = clampStat(job.performance - PROMOTION_PERFORMANCE_COST);
   c.flags.jobsHeld = counter(c.flags.jobsHeld) + 1;
-  if (next.fameGain !== undefined) c.fame = clampStat(c.fame + next.fameGain);
+  /* Guarded before the add, not after it: `clampStat(NaN)` is 0, so an
+     unreadable `fameGain` would wipe a career's fame instead of skipping it. */
+  if (next.fameGain !== undefined) c.fame = clampStat(c.fame + contentNumber(next.fameGain, 0));
 
   return { icon: '🎉', kind: 'good', text: `You were promoted to ${next.title}.` };
 }
@@ -171,7 +194,7 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
        itself nor bury the career it is remembered by. */
     c.flags.pensionSalary = Math.max(
       counter(c.flags.pensionSalary),
-      Math.round(job.salary * PENSION_SHARE)
+      Math.round(contentNumber(job.salary, 0) * PENSION_SHARE)
     );
     c.job = null;
     if (!alreadyRetired) {
@@ -199,7 +222,7 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
 
   const def = findJob(ctx.reg, job.jobId);
   if (def) {
-    job.salary = Math.round(job.salary * (1 + def.raisePct));
+    job.salary = Math.round(job.salary * (1 + contentNumber(def.raisePct, 0)));
     const promotion = rollPromotion(ctx, def);
     if (promotion) {
       entries.push(promotion);
@@ -217,7 +240,14 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
 
   if (ctx.rng.chance(LAYOFF_CHANCE)) {
     c.flags.lastJobTitle = job.title;
-    c.money = Math.max(0, Math.round(c.money + Math.round(SEVERANCE_SHARE * job.salary)));
+    /* `clampMoney`, never `Math.max(0, ...)`: the content rates behind
+       `job.salary` are guarded where they are read, but a load certifies the
+       shape of `c.job` and not the values inside it, and an unreadable severance
+       must leave the balance alone rather than replace it with NaN — which the
+       finance phase would then settle to $0 the same year. See `clampMoney`'s
+       own comment. */
+    const severance = Math.round(SEVERANCE_SHARE * job.salary);
+    c.money = clampMoney(c.money + severance, c.money);
     c.job = null;
     entries.push({ icon: '📦', kind: 'bad', text: 'You were laid off.' });
   }
@@ -298,7 +328,7 @@ export function applyForJob(
   c.job = {
     jobId: def.id,
     title: def.title,
-    salary: Math.round(def.baseSalary),
+    salary: Math.round(contentNumber(def.baseSalary, 0)),
     years: 0,
     performance: clampStat(
       START_PERFORMANCE + (c.stats.smarts - SMARTS_BASELINE) / SMARTS_PER_POINT

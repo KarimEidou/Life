@@ -1,3 +1,4 @@
+import { fmtMoney } from '@/engine/format';
 import type {
   Character,
   ContentPack,
@@ -144,6 +145,11 @@ const interactions: InteractionDef[] = [
         effects: [
           { kind: 'money', delta: fee },
           { kind: 'stat', stat: 'happiness', delta: 1 },
+          /* A `money` effect writes the balance and logs nothing, so a fee that
+             scales with fame — and is the largest repeatable payout in the game —
+             would reach the player nowhere. Named the way `rel-ask-money` names
+             its own rolled cheque. */
+          { kind: 'log', icon: '💵', text: `+${fmtMoney(fee)}`, logKind: 'money' },
         ],
       };
     },
@@ -384,6 +390,7 @@ const events: EventDef[] = [
     choices: [
       {
         label: 'Campaign for it',
+        condition: (ctx: Ctx) => ctx.c.money >= 20000,
         outcomes: [
           {
             weight: 5,

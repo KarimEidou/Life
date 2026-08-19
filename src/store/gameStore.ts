@@ -144,23 +144,84 @@ function writeTableSidecar(slot: number | null, table: BlackjackTable | null): v
   }
 }
 
+/** A dealt hand as the sidecar has to hold it: display strings such as `A♠`. */
+function isHand(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((card) => typeof card === 'string');
+}
+
+/** A stake, total or payout the arithmetic downstream can actually use. */
+function isAmount(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+/**
+ * Restores the hand a mid-hand reload left behind; null unless the sidecar
+ * holds a whole, still-open table.
+ *
+ * Every field is checked, not just the ones that decide whether a hand shows:
+ * what comes back is adopted straight into `casino`, and its consumers
+ * dereference the rest without a guard — the casino sheet maps over `dealer`
+ * during render and `blackjackStand` spreads it, neither behind an error
+ * boundary, so half a table blanks the app rather than costing one hand.
+ * Refusing forfeits only the stake this key exists to protect, which is the
+ * cheaper failure. The key carries no version of its own, so this gate is also
+ * the only thing standing between a reshaped `BlackjackTable` and live state.
+ */
 function readTableSidecar(slot: number): BlackjackTable | null {
   try {
     const raw = storage.getItem(tableKey(slot));
     if (raw === null) {
       return null;
     }
-    const table = JSON.parse(raw) as BlackjackTable;
+    const parsed: unknown = JSON.parse(raw);
+    // `typeof null === 'object'`, so the null sidecar needs its own refusal.
+    if (parsed === null || typeof parsed !== 'object') {
+      return null;
+    }
+    const table = parsed as Partial<BlackjackTable>;
     const openHand =
-      typeof table === 'object' &&
-      Array.isArray(table.player) &&
+      isHand(table.player) &&
       table.player.length > 0 &&
+      isHand(table.dealer) &&
       table.done === false &&
-      typeof table.bet === 'number';
-    return openHand ? table : null;
+      isAmount(table.bet) &&
+      table.bet > 0 &&
+      isAmount(table.playerTotal) &&
+      isAmount(table.dealerTotal) &&
+      isAmount(table.payout);
+    return openHand ? (table as BlackjackTable) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Reopens a life parked on `awaitingChoice` with no card to answer; true when
+ * it repaired something.
+ *
+ * The engine never mints that state — `eventsPhase` queues the card and sets the
+ * phase in one step, and every exit recomputes the phase from what is left — but
+ * a save can carry it (`loadGame` validates only the version and the character),
+ * and it is the one state with no way out of the UI: `routePhase` puts up the
+ * event sheet, that sheet is mounted non-dismissible over a full-screen backdrop
+ * that swallows every tap, and it renders nothing at all without a card. The
+ * repair mirrors the engine's own (`ageUp`, `discardPending`): there is no card,
+ * so there is nothing to narrate and nothing to roll — it costs no log line and
+ * no draw, and replays identically.
+ */
+function repairStalledChoice(game: GameState): boolean {
+  if (game.phase !== 'awaitingChoice') {
+    return false;
+  }
+  /* Widened like the engine's read: a drifted queue can be absent entirely, or
+     hold a null head that would throw on the first property access. */
+  const queued: readonly (PendingEvent | undefined)[] | undefined = game.pending;
+  if (queued?.[0]) {
+    return false;
+  }
+  game.pending = [];
+  game.phase = 'alive';
+  return true;
 }
 
 /** Sends the UI wherever the life's phase demands after a mutation. */
@@ -262,6 +323,10 @@ export const useGameStore = create<GameStore>()((set, get) => {
       if (!result.ok) {
         return false;
       }
+      /* Repaired before the state is adopted, not from inside `routePhase`:
+         `commit` spreads the game object before routing, so a mutation made
+         down there would never reach the copy React renders. */
+      repairStalledChoice(result.state);
       set({ game: result.state, slot, casino: readTableSidecar(slot) });
       const ui = useUiStore.getState();
       ui.closeAllSheets();
@@ -294,6 +359,10 @@ export const useGameStore = create<GameStore>()((set, get) => {
       if (game === null) {
         return;
       }
+      /* Checked before the phase guard: the engine makes this same repair on its
+         way in, but the guard below would re-route into the event sheet long
+         before `engineAgeUp` ever sees the state. */
+      repairStalledChoice(game);
       if (game.phase !== 'alive') {
         // A dismissed event sheet or a finished life: re-route instead of aging.
         routePhase(game);
@@ -309,10 +378,16 @@ export const useGameStore = create<GameStore>()((set, get) => {
       if (game === null || game.phase !== 'awaitingChoice') {
         return;
       }
-      const card: PendingEvent | undefined = game.pending[0];
-      if (card === undefined) {
+      /* Nothing to answer is drifted save data too: `resolveChoice` would throw
+         on it, and returning would leave the life parked behind the event sheet
+         with no move left. Reopen the year instead, then commit so the router
+         drops that sheet. */
+      if (repairStalledChoice(game)) {
+        commit(game);
         return;
       }
+      // The repair above cleared every queue with nothing at its head.
+      const card: PendingEvent = game.pending[0];
       /* Only a populated card with an out-of-range index is refused (the
          engine would throw). A card with no choices — drifted save data —
          must still reach resolveChoice, whose discard path is the designed

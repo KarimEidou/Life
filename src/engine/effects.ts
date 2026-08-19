@@ -11,6 +11,17 @@ import { fillTemplate } from '@/engine/format';
 /** Kinds `{kind:'rel', who:'random-family'}` may land on. */
 const FAMILY_KINDS: readonly RelKind[] = ['mother', 'father', 'sibling', 'child'];
 
+/**
+ * Hard ceiling on a prison sentence, in years.
+ *
+ * Not a design rule: `deathCheck` forces death at 110, so this never shortens a
+ * sentence anyone could live to serve. It exists because `careerPhase` releases
+ * a prisoner by `yearsLeft -= 1` reaching 0, and above 2^53 that subtraction
+ * stops changing the number — an absurd but finite sentence would be exactly as
+ * unescapable as `Infinity`.
+ */
+const MAX_SENTENCE_YEARS = 200;
+
 /** Clamps a stat into 0..100 and rounds it to one decimal place. */
 export function clampStat(n: number): number {
   if (Number.isNaN(n)) return 0;
@@ -152,7 +163,28 @@ export function applyEffects(ctx: EffectCtx, effects: Effect[]): LogEntry[] {
         break;
       }
       case 'jail': {
-        const years = Math.max(0, Math.round(effect.years));
+        /* The one number in this switch no clamp helper covers, so it carries
+           `clampMoney`'s policy itself: `Math.max(0, NaN)` is NaN, and a NaN or
+           Infinity `yearsLeft` never satisfies `careerPhase`'s `<= 0` release
+           test, so an unreadable sentence written verbatim would outlast the
+           life. It buys no time at all instead. */
+        const raw = effect.years;
+        const years = Number.isFinite(raw)
+          ? Math.min(MAX_SENTENCE_YEARS, Math.max(0, Math.round(raw)))
+          : 0;
+        if (years <= 0) {
+          /* A sentence of no time is a conviction, not a cell — and a routine
+             one, since a crime's `sentenceYears` range may start at 0. Building
+             a `PrisonState` for it would cost the job for time never served,
+             lock every non-prison sheet for the year, and then pay out
+             `careerPhase`'s release relief on the very next age-up. */
+          entries.push({
+            icon: '⚖️',
+            text: `You were convicted of ${effect.crime}, but served no time.`,
+            kind: 'legal',
+          });
+          break;
+        }
         c.prison = { crime: effect.crime, yearsLeft: years, totalYears: years };
         /* The fifth job-ending path (career.ts owns the other four): remember the
            title before the sentence clears it, or the obituary reads "Unemployed". */

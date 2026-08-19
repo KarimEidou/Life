@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion';
+import { motion, useIsPresent } from 'framer-motion';
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
 
 interface SheetProps {
@@ -60,13 +60,19 @@ export function Sheet({
   height,
   reduceMotion,
 }: SheetProps): ReactElement | null {
+  /* `AnimatePresence` keeps a removed sheet mounted — and spliced back above the
+     sheet below it — for the whole exit spring, so an opacity-0 backdrop still
+     hit-tests. Going inert stops the exit from eating taps meant for what is now
+     underneath, and from firing `onClose` for a sheet that is already gone.
+     `true` outside `AnimatePresence`, where there is nothing to exit from. */
+  const present = useIsPresent();
   if (!open) {
     return null;
   }
   const canDismiss = dismissible !== false;
   const still = reduceMotion === true;
   return (
-    <div style={overlayStyle}>
+    <div style={{ ...overlayStyle, pointerEvents: present ? 'auto' : 'none' }}>
       <motion.div
         style={backdropStyle}
         initial={{ opacity: 0 }}

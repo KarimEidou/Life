@@ -38,6 +38,52 @@ function stringOr(v: unknown, fallback: string): string {
   return typeof v === 'string' ? v : fallback;
 }
 
+/**
+ * The load-time shape gate: every container the engine and the UI dereference
+ * without a guard once a save has been adopted (`character.job.title` in the
+ * header, `Object.values(state.people)` in the text formatter, `state.log.map`
+ * in the feed, …). `loadGame` is the only validation boundary for this data and
+ * there is no error boundary above the screens, so a payload that gets past
+ * here and then throws during render takes the whole app down; `corrupt` routes
+ * to the Continue/Delete alert instead. Values inside the containers stay
+ * unchecked — this rejects unusable saves, it does not certify sound ones.
+ */
+function isGameStateShaped(v: unknown): v is Record<string, unknown> {
+  if (!isRecord(v)) {
+    return false;
+  }
+  const c = v.character;
+  if (!isRecord(c)) {
+    return false;
+  }
+  if (!isRecord(c.stats) || !isRecord(c.education) || !isRecord(c.pronouns)) {
+    return false;
+  }
+  if (!isRecord(c.flags) || !isRecord(c.investments) || !isRecord(c.addictions)) {
+    return false;
+  }
+  if (!Array.isArray(c.assets) || !Array.isArray(c.loans) || !Array.isArray(c.illnesses)) {
+    return false;
+  }
+  // Legitimately null, so only the alternative to a record can be admitted.
+  if (c.job !== null && !isRecord(c.job)) {
+    return false;
+  }
+  if (c.prison !== null && !isRecord(c.prison)) {
+    return false;
+  }
+  if (!isRecord(v.people) || !isRecord(v.interactionUse)) {
+    return false;
+  }
+  if (!Array.isArray(v.log) || !Array.isArray(v.pending)) {
+    return false;
+  }
+  if (!Array.isArray(v.firedEvents) || !Array.isArray(v.ancestors)) {
+    return false;
+  }
+  return typeof v.phase === 'string';
+}
+
 /** Adapter over `window.localStorage`, guarded for non-browser environments. */
 export function browserStorage(): StorageAdapter {
   if (typeof localStorage === 'undefined') {
@@ -114,7 +160,11 @@ export function loadGame(storage: StorageAdapter, slot: number): LoadResult {
     return { ok: false, reason: 'future' };
   }
   const stored = parsed.state;
-  if (!isRecord(stored) || !isRecord(stored.character)) {
+  /* Only "is it an object at all" before the chain: a migration exists precisely
+     to reshape `GameState`, so shape-gating here would make the one change a
+     step most plausibly has to perform — creating, renaming or moving a
+     top-level key — unreachable behind a `corrupt` verdict. */
+  if (!isRecord(stored)) {
     return { ok: false, reason: 'corrupt' };
   }
 
@@ -132,7 +182,8 @@ export function loadGame(storage: StorageAdapter, slot: number): LoadResult {
     version += 1;
   }
 
-  if (!isRecord(state) || !isRecord(state.character)) {
+  // The single shape gate, judging what the migrations actually produced.
+  if (!isGameStateShaped(state)) {
     return { ok: false, reason: 'corrupt' };
   }
   return { ok: true, state: state as unknown as GameState };
@@ -152,20 +203,36 @@ function summarise(storage: StorageAdapter, slot: number): SlotSummary {
       return { slot, empty: true };
     }
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed) || !isRecord(parsed.state)) {
+    if (!isRecord(parsed)) {
       return { slot, empty: true };
     }
+    /* Version before shape, as in `loadGame`: a newer build is exactly where
+       `GameState` may have been reshaped, so a payload this build cannot read
+       still holds a real save. An `empty` row offers the slot to `startNew`,
+       which overwrites it with no confirmation, whereas an occupied row routes
+       through Continue and reports `future`. */
+    const unreadable: SlotSummary =
+      typeof parsed.version === 'number' && parsed.version > SAVE_VERSION
+        ? { slot, empty: false, savedAt: numberOr(parsed.savedAt, 0) }
+        : { slot, empty: true };
     const state = parsed.state;
+    if (!isRecord(state)) {
+      return unreadable;
+    }
     const character = state.character;
     if (!isRecord(character)) {
-      return { slot, empty: true };
+      return unreadable;
     }
     const first = stringOr(character.firstName, '');
     const last = stringOr(character.lastName, '');
+    const label = `${first} ${last}`.trim();
     return {
       slot,
       empty: false,
-      name: `${first} ${last}`.trim(),
+      /* Absent rather than empty: the load menu titles the row and its
+         confirmation alert `name ?? 'Saved life'`, and nullish coalescing keeps
+         `''`, leaving the player to Continue-or-Delete an unlabelled slot. */
+      name: label === '' ? undefined : label,
       age: numberOr(character.age, 0),
       money: numberOr(character.money, 0),
       generation: numberOr(state.generation, 1),

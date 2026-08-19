@@ -34,6 +34,19 @@ const dimStyle: CSSProperties = {
   opacity: 0.55,
 };
 
+/**
+ * One count off a stored sentence, read defensively.
+ *
+ * `PrisonState` comes back from `JSON.parse` on every load and `loadGame` checks
+ * only that it is an object, so both counts are whatever the file held — a
+ * fractional or negative year, a NaN that renders as `width: "NaN%"`, or the
+ * `{ yearsLeft: 0, totalYears: 0 }` cell that builds before "no time, no cell"
+ * wrote and saved. An unreadable count is no time at all.
+ */
+function years(raw: number): number {
+  return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0;
+}
+
 /** The crimes that can be committed, with their odds and sentences. */
 export function CrimeSheet(): ReactElement | null {
   const game = useGameStore((s) => s.game);
@@ -47,21 +60,24 @@ export function CrimeSheet(): ReactElement | null {
 
   if (prison !== null) {
     const actions = availableInteractions(game, reg, 'prison');
+    const left = years(prison.yearsLeft);
+    /* `extendSentence` keeps `totalYears >= yearsLeft`; a save that drifted out
+       of that would fill the bar backwards, so repair it the way the engine
+       does rather than showing less time than is actually left to serve. */
+    const total = Math.max(years(prison.totalYears), left);
     return (
       <SheetChrome id="crime" title="Crime">
         <Card>
           <div style={cardColStyle}>
             <div style={strongStyle}>In prison for {prison.crime}</div>
-            <ProgressBar
-              value={
-                prison.totalYears > 0
-                  ? ((prison.totalYears - prison.yearsLeft) / prison.totalYears) * 100
-                  : 100
-              }
-              animated
-            />
+            {/* A term with nothing left to serve reads as none of it served, the
+                way every sentence does on the year it is handed down — a full
+                bar would call it over while the sheet is still the prison view
+                and every `free()` row refuses. `careerPhase` opens the door on
+                the next age-up, which is what the line below promises. */}
+            <ProgressBar value={total > 0 ? ((total - left) / total) * 100 : 0} animated />
             <div style={metaStyle}>
-              {prison.yearsLeft} of {prison.totalYears} years left
+              {left > 0 ? `${left} of ${total} years left` : 'Out by the end of the year'}
             </div>
           </div>
         </Card>

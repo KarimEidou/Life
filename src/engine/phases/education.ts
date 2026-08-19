@@ -9,7 +9,7 @@
  */
 
 import { currentYearLog } from '@/engine/ageUp';
-import { clampStat } from '@/engine/effects';
+import { clampMoney, clampStat } from '@/engine/effects';
 /* Finance owns loans, and student debt shares the id counter with every other
    loan, so the id comes from there rather than from a second minting rule. */
 import { mintLoanId } from '@/engine/phases/finance';
@@ -41,6 +41,12 @@ const GPA_SMARTS_SPAN = 3.4;
 const GPA_STUDY_BONUS = 0.4;
 const GPA_SD = 0.2;
 const GPA_MAX = 4;
+
+/**
+ * Lowest grade a graded year can record: one step of the two-decimal grid
+ * `rollGpa` rounds onto, because 0 is `gpaTooLow`'s "never graded" sentinel.
+ */
+const GPA_MIN_GRADED = 0.01;
 
 /** Yearly price of studying hard, and what it buys. */
 const STUDY_HAPPINESS_COST = 2;
@@ -79,7 +85,14 @@ function isDegree(def: SchoolDef): boolean {
   return def.level === 'university' || def.level === 'postgrad';
 }
 
-/** A GPA of 0 means it was never graded, not a failing student, so it passes. */
+/**
+ * A GPA of 0 means it was never graded, not a failing student, so it passes.
+ *
+ * `rollGpa` floors at `GPA_MIN_GRADED` precisely so a real transcript can never
+ * land on that sentinel. Back when the roll could reach 0.00 this refusal was
+ * non-monotonic: 0.01 was turned away and 0.00 — strictly worse — was admitted,
+ * so a dead-last student was the only applicant no minimum could stop.
+ */
 function gpaTooLow(ed: EducationState, def: SchoolDef): boolean {
   const minGpa = def.minGpa;
   return minGpa !== undefined && ed.gpa > 0 && ed.gpa < minGpa;
@@ -120,7 +133,7 @@ function rollGpa(ctx: Ctx): number {
     (c.stats.smarts / 100) * GPA_SMARTS_SPAN +
     (c.education.studyHard ? GPA_STUDY_BONUS : 0) +
     ctx.rng.normal(0, GPA_SD);
-  const bounded = Math.min(GPA_MAX, Math.max(0, raw));
+  const bounded = Math.min(GPA_MAX, Math.max(GPA_MIN_GRADED, raw));
   return Math.round(bounded * 100) / 100;
 }
 
@@ -164,7 +177,10 @@ function advanceDegree(ctx: Ctx, def: SchoolDef): LogEntry[] {
   const tuition = Math.round(def.tuitionPerYear);
   if (tuition > 0) {
     if (c.money >= tuition) {
-      c.money = Math.max(0, Math.round(c.money - tuition));
+      /* `clampMoney`, never `Math.max(0, ...)`: an unreadable balance clears the
+         affordability check above (`Infinity >= tuition`), so this is the write
+         that has to settle it. See `clampMoney`'s own comment. */
+      c.money = clampMoney(c.money - tuition, c.money);
     } else {
       /* One accumulating student debt, not one record per school year: minting a
          fresh loan every year left a four-year degree owing four separate

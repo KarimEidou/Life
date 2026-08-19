@@ -97,6 +97,32 @@ const JOBS: JobDef[] = [
     },
   },
   {
+    // An unvalidated pack: `validateRegistry` lints an unreadable rate, but
+    // nothing calls it at load, so the engine has to survive one.
+    id: 'glitch',
+    track: 'odd',
+    title: 'Sign Spinner',
+    icon: '🪧',
+    level: 1,
+    baseSalary: 60000,
+    raisePct: Number.NaN,
+    req: {},
+    promotesTo: 'glitch-lead',
+  },
+  {
+    // The rung above it, with the other two numbers the career phase reads out
+    // of content unreadable as well.
+    id: 'glitch-lead',
+    track: 'odd',
+    title: 'Lead Sign Spinner',
+    icon: '🪧',
+    level: 2,
+    baseSalary: Number.NaN,
+    raisePct: 0.01,
+    req: { prevJobId: 'glitch' },
+    fameGain: Number.NaN,
+  },
+  {
     id: 'dreamer',
     track: 'odd',
     title: 'Dreamer',
@@ -358,6 +384,27 @@ describe('careerPhase at work', () => {
 
     expect(state.character.job?.salary).toBe(41234);
   });
+
+  it('keeps the salary a pack with an unreadable raise cannot grow', () => {
+    const state = newLife(30);
+    state.character.age = 30;
+    state.character.job = jobState({
+      jobId: 'glitch',
+      title: 'Sign Spinner',
+      salary: 60000,
+      // Short of the promotion bar, so the year is nothing but the raise.
+      years: 0,
+      performance: 70,
+    });
+    state.rngState = initialRngState(19);
+
+    careerPhase(ctxFor(state));
+
+    /* `1 + NaN` is NaN and the salary is stored, so an unreadable raise used to
+       cost the character the wage itself for the rest of the life — and the
+       severance, the loan cap and the pension with it. It buys nothing now. */
+    expect(state.character.job?.salary).toBe(60000);
+  });
 });
 
 /* ---------------------------------------------------------------------------
@@ -428,6 +475,45 @@ describe('promotion', () => {
     // The early return on a promotion does not refund the effort.
     expect(state.character.stats.health).toBe(78.5);
     expect(state.character.stats.happiness).toBe(59);
+  });
+
+  /* A rung whose `baseSalary` and `fameGain` are both unreadable. The floor and
+     the fame bonus are the only two numbers a promotion reads out of content. */
+  const intoGlitchLead = (): GameState => {
+    const s = promotable();
+    s.character.fame = 85;
+    s.character.job = jobState({
+      jobId: 'glitch',
+      title: 'Sign Spinner',
+      salary: 40000,
+      years: 3,
+      performance: 85,
+    });
+    return s;
+  };
+
+  it('promotes on the raise alone when the rung cannot say what it pays', () => {
+    const { state } = forceBranch(
+      intoGlitchLead,
+      (s) => careerPhase(ctxFor(s)),
+      (s) => s.character.job?.jobId === 'glitch-lead'
+    );
+
+    /* `Math.max(42000, NaN)` is NaN. An unreadable floor cannot lift the salary,
+       but the 5% the promotion is worth still has to arrive. */
+    expect(state.character.job?.salary).toBe(42000);
+  });
+
+  it('keeps the fame a rung with an unreadable bonus cannot add to', () => {
+    const { state } = forceBranch(
+      intoGlitchLead,
+      (s) => careerPhase(ctxFor(s)),
+      (s) => s.character.job?.jobId === 'glitch-lead'
+    );
+
+    /* `clampStat(NaN)` is 0 by design, so guarding after the add would reset a
+       career's fame to nothing instead of skipping the bonus. */
+    expect(state.character.fame).toBe(85);
   });
 
   it('needs two years in the chair', () => {
@@ -547,6 +633,35 @@ describe('firing and layoffs', () => {
     expect(c.money).toBe(1224);
     expect(c.flags.lastJobTitle).toBe('Barista');
   });
+
+  it('keeps the balance when an unreadable salary makes the severance unreadable', () => {
+    const { state } = forceBranch(
+      () => {
+        const s = newLife(12);
+        s.character.age = 40;
+        s.character.money = 250000;
+        /* No content rate can mint this any more — they are all read through
+           `contentNumber` — but `loadGame` certifies the shape of `c.job`, not
+           the values inside it, so a save can still seat one. */
+        s.character.job = jobState({
+          jobId: 'barista',
+          title: 'Barista',
+          salary: Number.NaN,
+          performance: 70,
+        });
+        return s;
+      },
+      (s) => careerPhase(ctxFor(s)),
+      (s, entries) => texts(entries).includes('You were laid off.')
+    );
+    const c = state.character;
+
+    expect(c.job).toBeNull();
+    /* An unreadable payment buys nothing, but it must not wipe the $250,000 that
+       was already there. `Math.max(0, NaN)` is NaN, and the finance phase
+       settles a NaN balance to $0 the same year. */
+    expect(c.money).toBe(250000);
+  });
 });
 
 /* ---------------------------------------------------------------------------
@@ -643,6 +758,28 @@ describe('retirement', () => {
     expect(c.job).toBeNull();
     expect(c.flags.pensionSalary).toBe(120000);
     expect(c.flags.lastJobTitle).toBe('Manager');
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('keeps a banked pension when the last seat pays something unreadable', () => {
+    const state = newLife(34);
+    const c = state.character;
+    c.age = 71;
+    c.flags.retired = true;
+    c.flags.lastJobTitle = 'Manager';
+    c.flags.pensionSalary = 120000;
+    // Only a save can seat this now; every content rate is read through a guard.
+    c.job = jobState({ jobId: 'barista', title: 'Barista', salary: Number.NaN, years: 2 });
+    const cursor = state.rngState;
+
+    const entries = careerPhase(ctxFor(state));
+
+    /* The ratchet folds the seat into a pension the character has already
+       banked, so `Math.max(120000, NaN)` does not lose the raise — it destroys
+       the pension, which `numberFlag` then reads back as $0 a year for life. */
+    expect(entries).toEqual([]);
+    expect(c.job).toBeNull();
+    expect(c.flags.pensionSalary).toBe(120000);
     expect(state.rngState).toBe(cursor);
   });
 
@@ -861,6 +998,22 @@ describe('applyForJob', () => {
     expect(state.log[state.log.length - 1].entries.slice(-1)).toEqual([
       { icon: '☕', kind: 'good', text: 'You started work as a Barista.' },
     ]);
+  });
+
+  it('hires at zero, not at NaN, when the pack cannot say what the job pays', () => {
+    const { state } = forceBranch(
+      () => {
+        const s = applicant();
+        s.character.job = jobState({ jobId: 'glitch', title: 'Sign Spinner', salary: 60000 });
+        return s;
+      },
+      (s) => applyForJob(s, REG, 'glitch-lead'),
+      (s, result) => result.ok
+    );
+
+    /* The seat is the source of every wage the life pays, so an unreadable
+       `baseSalary` has to stop at the door rather than be stored. */
+    expect(state.character.job?.salary).toBe(0);
   });
 
   it('counts every job held', () => {

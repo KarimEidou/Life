@@ -96,7 +96,11 @@ export function FinanceSheet(): ReactElement | null {
   };
 
   const borrowNow = (): void => {
-    const wanted = Number.parseInt(borrow, 10);
+    // Every amount the app shows is comma-grouped, so the field has to read one
+    // back: `Number.parseInt` stops at the separator and would borrow $10 for
+    // "10,000" without a word. Anything else is refused, never truncated.
+    const cleaned = borrow.replace(/[,\s]/g, '');
+    const wanted = /^\d+(\.\d+)?$/.test(cleaned) ? Math.round(Number(cleaned)) : Number.NaN;
     if (Number.isNaN(wanted)) {
       useUiStore.getState().addToast({ icon: '🏦', title: 'Enter an amount to borrow.' });
       return;

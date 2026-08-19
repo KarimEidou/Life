@@ -17,6 +17,13 @@ import type { ContentPack, JobDef } from '@/types';
  * hard becomes a shift lead without ever meeting the diploma requirement, while
  * someone applying cold off the street still has to bring one.
  *
+ * Stat gates only ratchet up a ladder, and every rung restates the highest
+ * minimum below it: `jobRequirementsMet` reads the rung's own `req` and never
+ * walks `prevJobId`, so a minimum left off a rung is a hole rather than an
+ * inheritance. Promotion ignores `req`, which is what makes that hole
+ * reachable — someone lifted onto rung 2 on merit without its stats would
+ * otherwise be able to apply straight up to a rung 3 that asks for nothing.
+ *
  * `req.education` never asks for more than a high school diploma at the bottom
  * of a ladder: the degree-gated professions are the professional pack's job.
  * The office and business ladders ask for a degree at their upper rungs only,
@@ -125,7 +132,7 @@ const jobs: JobDef[] = [
     level: 3,
     baseSalary: 62000,
     raisePct: 0.03,
-    req: { minAge: 24, education: 'high', prevJobId: 'job-electrician' },
+    req: { minAge: 24, education: 'high', minSmarts: 40, prevJobId: 'job-electrician' },
     promotesTo: 'job-contractor',
   },
   {
@@ -205,7 +212,7 @@ const jobs: JobDef[] = [
     level: 2,
     baseSalary: 60000,
     raisePct: 0.03,
-    req: { minAge: 22, education: 'university', prevJobId: 'job-sales-rep' },
+    req: { minAge: 22, education: 'university', minLooks: 40, prevJobId: 'job-sales-rep' },
     promotesTo: 'job-sales-vp',
   },
   {
@@ -216,7 +223,13 @@ const jobs: JobDef[] = [
     level: 3,
     baseSalary: 150000,
     raisePct: 0.04,
-    req: { minAge: 30, education: 'university', minSmarts: 65, prevJobId: 'job-account-exec' },
+    req: {
+      minAge: 30,
+      education: 'university',
+      minSmarts: 65,
+      minLooks: 40,
+      prevJobId: 'job-account-exec',
+    },
   },
 ];
 

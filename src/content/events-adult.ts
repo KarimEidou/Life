@@ -808,6 +808,7 @@ const events: EventDef[] = [
     maxAge: 64,
     weight: 2,
     oncePerLife: true,
+    condition: free,
     text: 'A great-aunt you barely remember left you something in her will.',
     effects: [
       { kind: 'money', delta: 9000 },
@@ -1966,6 +1967,7 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 64,
     weight: 5,
+    condition: free,
     text: 'You have stood in this exact spot saying this exact sentence before.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 2 },
@@ -2058,6 +2060,7 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 64,
     weight: 5,
+    condition: free,
     text: 'The rain caught you halfway home, so you stopped hurrying.',
     effects: [{ kind: 'stat', stat: 'happiness', delta: 3 }],
   },

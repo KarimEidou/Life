@@ -271,6 +271,8 @@ describe('createLife', () => {
         expect(sibling.age).toBeLessThanOrEqual(10);
         expect(sibling.rel).toBeGreaterThanOrEqual(55);
         expect(sibling.rel).toBeLessThanOrEqual(95);
+        expect(mothers[0].age - sibling.age).toBeGreaterThanOrEqual(16);
+        expect(fathers[0].age - sibling.age).toBeGreaterThanOrEqual(16);
       }
 
       for (const person of people) {
@@ -281,6 +283,33 @@ describe('createLife', () => {
 
     expect(sawNoSiblings).toBe(true);
     expect(sawSiblings).toBe(true);
+  });
+
+  /* Sibling ages used to be rolled independently of the parents', so the
+     relationships sheet could list a mother of 20 above her 10-year-old. Swept
+     wide because the offending pairs are a thin slice of the parent ranges. */
+  it('never mints a sibling born before either parent turned 16', () => {
+    let sawSibling = false;
+    const ages = new Set<number>();
+
+    for (let seed = 1; seed <= 400; seed += 1) {
+      const state = createLife(testRegistry(), { seed });
+      const people = peopleOf(state);
+      const mothers = people.filter((p) => p.kind === 'mother');
+      const fathers = people.filter((p) => p.kind === 'father');
+
+      for (const sibling of people.filter((p) => p.kind === 'sibling')) {
+        sawSibling = true;
+        ages.add(sibling.age);
+        expect(mothers[0].age - sibling.age).toBeGreaterThanOrEqual(16);
+        expect(fathers[0].age - sibling.age).toBeGreaterThanOrEqual(16);
+      }
+    }
+
+    expect(sawSibling).toBe(true);
+    // The parents narrow the range; they must not collapse it onto its floor.
+    expect(ages.has(1)).toBe(true);
+    expect(ages.has(10)).toBe(true);
   });
 
   it('numbers family members sequentially and leaves the counter ready', () => {
@@ -505,6 +534,25 @@ describe('emigrateTo', () => {
     expect(state.character.money).toBe(8000);
     expect(state.character.flags.lastVisaAge).toBe(30);
   });
+
+  /* A drifted save can hand the character an unreadable balance — `JSON.parse`
+     turns the literal `1e999` into Infinity — and every comparison against one is
+     false, so the affordability gate lets it through. The fee write is then the
+     only thing that can settle it: `Math.max(0, Math.round(NaN))` is NaN, and a
+     balance nothing can spend would go on poisoning net worth and the epitaph. */
+  const unreadable: readonly number[] = [Number.POSITIVE_INFINITY, Number.NaN];
+
+  for (const money of unreadable) {
+    it(`settles an unreadable balance of ${String(money)} instead of writing it back`, () => {
+      const state = adult();
+      state.character.money = money;
+
+      emigrateTo(state, testRegistry(), 'jp');
+
+      expect(Number.isFinite(state.character.money)).toBe(true);
+      expect(state.character.money).toBe(0);
+    });
+  }
 
   /** Rolls the same application from different cursors until it lands `wanted`. */
   function applicationWhere(wanted: boolean, tweak?: (s: GameState) => void): GameState {

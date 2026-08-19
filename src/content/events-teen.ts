@@ -4,6 +4,11 @@
  * Same null-safety contract as the childhood pack: parents, siblings and a first
  * romance may all be missing, so anything that names one gates on that person
  * being alive and every affinity nudge is a no-op when they are not.
+ *
+ * Prison is the one blanket exclusion: `eventsPhase` keeps drawing while the
+ * character is inside, and a food-court shift or a bleach job in the bathroom
+ * reads as a bug from a cell. The prison pack owns those years, so everything
+ * here asks `free` first — either directly or through `inSchool`.
  */
 
 import { addPerson } from '@/engine/state';
@@ -47,9 +52,15 @@ function isSingle(ctx: Ctx): boolean {
   return livingKin(people, 'partner').length === 0 && livingKin(people, 'spouse').length === 0;
 }
 
+/** Not behind bars. The prison pack owns those years, so anything out in the
+ *  world asks this first. */
+function free(ctx: Ctx): boolean {
+  return ctx.c.prison === null;
+}
+
 /** Every school-life event needs a desk to happen at; a cell is not one. */
 function inSchool(ctx: Ctx): boolean {
-  return ctx.c.education.enrolledIn !== undefined && !ctx.c.prison;
+  return free(ctx) && ctx.c.education.enrolledIn !== undefined;
 }
 
 /** The sibling the texts name and the effects hit: always the first one listed. */
@@ -140,7 +151,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 5,
-    condition: isSingle,
+    condition: (ctx) => free(ctx) && isSingle(ctx),
     text: 'There is someone in your class you think about more than you think about anything else.',
     choices: [
       {
@@ -205,6 +216,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 4,
+    condition: free,
     text: (ctx) =>
       `Your skin declared war ${ctx.rng.pick([
         'the week of the school photo',
@@ -225,7 +237,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 15,
     weight: 3,
-    condition: (ctx) => ctx.c.gender !== 'female',
+    condition: (ctx) => free(ctx) && ctx.c.gender !== 'female',
     text: 'Your voice cracked while reading aloud. Then it cracked twice more, out of spite.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: -4 },
@@ -239,6 +251,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 4,
+    condition: free,
     text: (ctx) =>
       `A group chat screenshot got out and you spent ${ctx.rng.pick([
         'three days',
@@ -257,6 +270,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 4,
+    condition: free,
     text: (ctx) =>
       `You and ${ctx.rng.pick([
         'two friends',
@@ -276,7 +290,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 4,
-    condition: hasParent,
+    condition: (ctx) => free(ctx) && hasParent(ctx),
     text: (ctx) =>
       `Family dinner. Somebody asked about ${ctx.rng.pick([
         'your grades',
@@ -297,7 +311,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 16,
     weight: 4,
-    condition: hasParent,
+    condition: (ctx) => free(ctx) && hasParent(ctx),
     text: (ctx) =>
       `You were grounded for ${ctx.rng.pick([
         'a week',
@@ -317,7 +331,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 4,
-    condition: hasSibling,
+    condition: (ctx) => free(ctx) && hasSibling(ctx),
     text: (ctx) =>
       `${siblingName(ctx)} took your best jacket without asking and returned it smelling of smoke.`,
     choices: [
@@ -444,7 +458,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 16,
     weight: 4,
-    condition: hasParent,
+    condition: (ctx) => free(ctx) && hasParent(ctx),
     text: 'Everyone in your year gets more pocket money than you, and you have prepared a case.',
     choices: [
       {
@@ -500,6 +514,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 17,
     weight: 4,
+    condition: inSchool,
     text: (ctx) =>
       `Tryouts for the school ${ctx.rng.pick([
         'basketball',
@@ -562,6 +577,7 @@ const events: EventDef[] = [
     minAge: 13,
     maxAge: 16,
     weight: 4,
+    condition: free,
     text: (ctx) =>
       `Two weeks at ${ctx.rng.pick([
         'a lake camp',
@@ -582,6 +598,7 @@ const events: EventDef[] = [
     minAge: 14,
     maxAge: 17,
     weight: 4,
+    condition: free,
     text: 'Somebody behind the sports hall holds out a cigarette and waits for an answer.',
     choices: [
       {
@@ -654,6 +671,7 @@ const events: EventDef[] = [
     /* A spouse would win `{partner}` in the text while `endRomance` ends the
        boyfriend/girlfriend, so this only fires when the romance is the only one. */
     condition: (ctx) =>
+      free(ctx) &&
       livingKin(ctx.state.people, 'partner').length > 0 &&
       livingKin(ctx.state.people, 'spouse').length === 0,
     text: '{partner} ended it by text. At 11pm. On a Tuesday.',
@@ -670,7 +688,7 @@ const events: EventDef[] = [
     minAge: 14,
     maxAge: 17,
     weight: 4,
-    condition: hasParent,
+    condition: (ctx) => free(ctx) && hasParent(ctx),
     text: 'You came in forty minutes late. The hall light was on, and the talk lasted longer.',
     effects: [{ kind: 'stat', stat: 'happiness', delta: -5 }, parentsRel(-6)],
   },
@@ -681,6 +699,7 @@ const events: EventDef[] = [
     minAge: 14,
     maxAge: 17,
     weight: 4,
+    condition: free,
     text: "There is a drum kit in a friend's garage and nobody's parents are home until six.",
     choices: [
       {
@@ -737,6 +756,7 @@ const events: EventDef[] = [
     minAge: 14,
     maxAge: 17,
     weight: 4,
+    condition: free,
     text: 'There is a box of bleach in the bathroom and forty minutes before anyone gets home.',
     choices: [
       {
@@ -793,6 +813,7 @@ const events: EventDef[] = [
     minAge: 14,
     maxAge: 17,
     weight: 3,
+    condition: free,
     text: (ctx) =>
       `You spent a Saturday ${ctx.rng.pick([
         'at the animal shelter',
@@ -814,6 +835,7 @@ const events: EventDef[] = [
     maxAge: 16,
     weight: 5,
     oncePerLife: true,
+    condition: free,
     text: 'You passed the written test and got your learner permit. The photo is permanent.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 7 },
@@ -829,7 +851,7 @@ const events: EventDef[] = [
     minAge: 15,
     maxAge: 17,
     weight: 4,
-    condition: (ctx) => ctx.c.job === null,
+    condition: (ctx) => free(ctx) && ctx.c.job === null,
     text:
       'The hardware shop on the corner has a card in the window: weekend help wanted, ask inside.',
     effects: [
@@ -845,6 +867,7 @@ const events: EventDef[] = [
     minAge: 15,
     maxAge: 17,
     weight: 3,
+    condition: free,
     text: 'One trial shift at the food court. You smell of fryer oil and you got paid in cash.',
     effects: [
       { kind: 'money', delta: 90 },
@@ -860,7 +883,7 @@ const events: EventDef[] = [
     maxAge: 17,
     weight: 5,
     oncePerLife: true,
-    condition: (ctx) => ctx.c.job !== null,
+    condition: (ctx) => free(ctx) && ctx.c.job !== null,
     text: 'Your first real paycheck. Taxes took a bite and you took it personally.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 8 },
@@ -874,7 +897,7 @@ const events: EventDef[] = [
     minAge: 15,
     maxAge: 17,
     weight: 3,
-    condition: (ctx) => ctx.c.job !== null,
+    condition: (ctx) => free(ctx) && ctx.c.job !== null,
     text:
       'Your manager offered you every shift going in the week before finals. You took all of them.',
     effects: [
@@ -952,7 +975,7 @@ const events: EventDef[] = [
     minAge: 15,
     maxAge: 17,
     weight: 5,
-    condition: hasParent,
+    condition: (ctx) => free(ctx) && hasParent(ctx),
     text: 'There is a party on Friday. You are not allowed to go to the party.',
     choices: [
       {
@@ -1008,7 +1031,7 @@ const events: EventDef[] = [
     minAge: 16,
     maxAge: 17,
     weight: 5,
-    condition: hasParent,
+    condition: (ctx) => free(ctx) && hasParent(ctx),
     text: (ctx) =>
       `Your first driving lesson, in ${ctx.rng.pick([
         'an empty car park',
@@ -1074,6 +1097,7 @@ const events: EventDef[] = [
     maxAge: 17,
     weight: 4,
     oncePerLife: true,
+    condition: inSchool,
     text: "Somebody's cousin is hosting a pre-prom party in a basement two hours before the dance.",
     choices: [
       {

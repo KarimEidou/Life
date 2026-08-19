@@ -120,6 +120,53 @@ describe('canUse', () => {
     });
   });
 
+  it('refuses a price that is not a readable amount, instead of handing the row over free', () => {
+    /* `Math.max(0, NaN)` is NaN and an infinite price passes every `> 0` test,
+       so an unreadable price used to be quoted at $0: the wallet check waved the
+       row through, `runInteraction` skipped the charge and the sheet printed no
+       price, which made an item priced beyond what the game can express the
+       cheapest thing in it. Compare a merely huge finite price, which refuses. */
+    for (const cost of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const state = newLife();
+      state.character.money = 1_000_000;
+      const reg = regOf({
+        interactions: [
+          interaction({
+            cost,
+            resolve: () => ({ text: 'Never runs.', effects: [{ kind: 'money', delta: 999 }] }),
+          }),
+        ],
+      });
+      const def = reg.interactionsById.gym as InteractionDef;
+      const rngBefore = state.rngState;
+
+      // No `cost` either: a price nobody can read is a quote for nobody, and
+      // `fmtMoney` would print the non-finite one the sheet renders as "$0".
+      expect(canUse(ctxOf(state, reg), def)).toEqual({
+        ok: false,
+        reason: "You can't afford it.",
+      });
+      expect(runInteraction(state, reg, 'gym')).toEqual({
+        text: "You can't afford it.",
+        icon: '🚫',
+        entries: [],
+      });
+      expect(state.character.money).toBe(1_000_000);
+      expect(state.interactionUse).toEqual({});
+      expect(feed(state)).toEqual([]);
+      expect(state.rngState).toBe(rngBefore);
+    }
+
+    // The same for a priced function whose arithmetic ran off the end of the
+    // number line, or that read a price the pack never authored.
+    const rich = newLife();
+    rich.character.money = 1_000_000;
+    expect(canUse(ctxOf(rich, EMPTY), interaction({ cost: () => Number.NaN }))).toEqual({
+      ok: false,
+      reason: "You can't afford it.",
+    });
+  });
+
   it('reports the price it validated and evaluates it only once', () => {
     const state = newLife();
     let calls = 0;
@@ -746,6 +793,83 @@ describe('commitCrime', () => {
     // 3 rolled * 1.5 for the prior conviction.
     expect(state.character.prison?.totalYears).toBe(5);
     expect(state.character.flags.convictions).toBe(2);
+  });
+
+  it('convicts without a cell when the term is no years at all', () => {
+    /* Not an edge case: four of the ten shipped crimes carry
+       `sentenceYears: [0, 1]`, so about half of their convictions roll a 0. The
+       rule that a term of no years is a conviction rather than a jailing lives
+       where the one `PrisonState` in the engine is built; this pins that the
+       crime layer inherits it, because a `{ yearsLeft: 0, totalYears: 0 }` cell
+       costs the job for time never served, refuses every `free()` row for the
+       year, and hands the crime sheet a sentence with nothing left to serve to
+       render. The repeat-offender multiplier must not invent time either. */
+    for (const priors of [0, 3]) {
+      const state = newLife();
+      state.character.job = {
+        jobId: 'j1',
+        title: 'Clerk',
+        salary: 30000,
+        years: 2,
+        performance: 60,
+        workHard: false,
+      };
+      state.character.flags.convictions = priors;
+      const happiness = state.character.stats.happiness;
+      const reg = regOf({ crimes: [crime({ successChance: () => 0, sentenceYears: [0, 0] })] });
+
+      const result = commitCrime(state, reg, 'shoplift');
+
+      expect(result.text).toBe('GUILTY. Shoplifting.');
+      expect(state.character.prison).toBeNull();
+      // No cell, so no job lost to one — and no obituary line about losing it.
+      expect(state.character.job?.title).toBe('Clerk');
+      expect(state.character.flags.lastJobTitle).toBeUndefined();
+      expect(result.entries[1]).toEqual({
+        icon: '⚖️',
+        kind: 'legal',
+        text: 'You were convicted of Shoplifting, but served no time.',
+      });
+      // Still a conviction: the mood cost and the record both land.
+      expect(state.character.stats.happiness).toBe(Math.max(0, happiness - 10));
+      expect(state.character.flags.convictions).toBe(priors + 1);
+      expect(feed(state)).toEqual(result.entries);
+    }
+  });
+
+  it('serves no sentence for a term that is not a number, instead of a cell with no exit', () => {
+    /* The sentence twin of the payout guard above. `rng.int` answers a NaN
+       bound with NaN and an infinite one with Infinity, and `careerPhase` ends
+       a sentence by subtracting one a year until `yearsLeft <= 0` — which
+       neither ever reaches, so the character would sit in a cell, jobless and
+       unpaid, for the rest of the life. The draw is spent either way, so the
+       sequence is unchanged, and the repeat-offender multiplier must not
+       resurrect the poison either. */
+    for (const sentenceYears of [
+      [Number.NaN, Number.NaN],
+      [3, Number.POSITIVE_INFINITY],
+    ] as [number, number][]) {
+      for (const priors of [0, 1]) {
+        const state = newLife();
+        state.character.flags.convictions = priors;
+        const reg = regOf({ crimes: [crime({ successChance: () => 0, sentenceYears })] });
+        const spent = { rngState: state.rngState };
+        const mirror = createRng(spent);
+        mirror.chance(0);
+        mirror.int(sentenceYears[0], sentenceYears[1]);
+
+        const result = commitCrime(state, reg, 'shoplift');
+
+        expect(result.text).toBe('GUILTY. Shoplifting.');
+        /* A conviction with no time to serve: the term is a number the prison
+           countdown can reach the end of. Whether that reads as a cell of zero
+           years or as no cell at all is `applyEffects`' call, not this one's. */
+        expect(state.character.prison?.yearsLeft ?? 0).toBe(0);
+        expect(result.entries[1].text).not.toMatch(/NaN|Infinity/);
+        expect(state.character.flags.convictions).toBe(priors + 1);
+        expect(state.rngState).toBe(spent.rngState);
+      }
+    }
   });
 
   it('splits into both branches across seeds and replays each one', () => {

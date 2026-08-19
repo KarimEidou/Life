@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - claude/ultrathink-ultracode-txbe0p
   workflow_dispatch:
 
 permissions:
@@ -13,9 +12,11 @@ permissions:
   pages: write
   id-token: write
 
+# Never cancel an in-progress run: killing actions/deploy-pages mid-flight can
+# leave the Pages deployment stuck and block the next one until it times out.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -36,6 +37,9 @@ jobs:
 
   deploy:
     needs: build
+    # One github-pages environment serves the live site, so only main may publish;
+    # a manual run from any other ref builds for validation and stops here.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

@@ -18,11 +18,17 @@ createRoot(container).render(
 const isSingleFile = Boolean(import.meta.env.VITE_SINGLEFILE);
 
 if (import.meta.env.PROD && !isSingleFile && 'serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    try {
-      void navigator.serviceWorker.register('sw.js');
-    } catch {
-      // Service worker is a progressive enhancement; failure is non-fatal.
-    }
-  });
+  /* `register` reports failure — private browsing, a 404 or wrong MIME type on
+     sw.js, a bad scope — by rejecting, never by throwing, so only a rejection
+     handler can keep a failed registration from surfacing as an unhandled
+     rejection. */
+  window.addEventListener(
+    'load',
+    () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {
+        // Service worker is a progressive enhancement; failure is non-fatal.
+      });
+    },
+    { once: true }
+  );
 }

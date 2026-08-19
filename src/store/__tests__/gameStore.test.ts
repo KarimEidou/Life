@@ -3,10 +3,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { getRegistry } from '@/content';
 import type { BlackjackTable } from '@/content/gambling';
 import { killCharacter } from '@/engine/death';
-import { memoryStorage } from '@/engine/save';
+import { memoryStorage, saveGame } from '@/engine/save';
 import { resetGameStoreForTests, useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
-import type { GameState, Person } from '@/types';
+import type { GameState, PendingEvent, Person } from '@/types';
 
 /** The loaded life, or a loud failure when a step expected one and it is gone. */
 function game(): GameState {
@@ -375,6 +375,68 @@ describe('review regressions', () => {
     expect(hasEventSheet()).toBe(false);
   });
 
+  /** Parks the loaded life on the drifted state: a choice due, nothing queued. */
+  function stallOnEmptyChoice(): void {
+    const g = game();
+    g.pending = [];
+    g.phase = 'awaitingChoice';
+  }
+
+  it('reopens a save parked on awaitingChoice with an empty queue', () => {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    useGameStore.getState().newLife({ slot: 1, seed: 9 });
+    stallOnEmptyChoice();
+    saveGame(adapter, 1, game());
+
+    // A reload: the event sheet this phase routes to is non-dismissible and
+    // renders no card, so adopting the phase as-is would lock the slot for good.
+    resetGameStoreForTests(adapter);
+    expect(useGameStore.getState().loadSlot(1)).toBe(true);
+    expect(game().phase).toBe('alive');
+    expect(hasEventSheet()).toBe(false);
+
+    // And the life screen is live again: the year still advances.
+    const age = game().character.age;
+    useGameStore.getState().ageUp();
+    expect(game().character.age).toBe(age + 1);
+  });
+
+  it('choose() reopens an empty queue instead of stranding the life', () => {
+    useGameStore.getState().newLife({ slot: 1, seed: 9 });
+    stallOnEmptyChoice();
+    useUiStore.getState().pushSheet('event');
+
+    useGameStore.getState().choose(0);
+    expect(game().phase).toBe('alive');
+    expect(game().pending).toHaveLength(0);
+    expect(hasEventSheet()).toBe(false);
+  });
+
+  it('choose() survives a queue whose head decoded as null', () => {
+    useGameStore.getState().newLife({ slot: 1, seed: 9 });
+    const g = game();
+    g.pending = [null as unknown as PendingEvent];
+    g.phase = 'awaitingChoice';
+    useUiStore.getState().pushSheet('event');
+
+    expect(() => {
+      useGameStore.getState().choose(0);
+    }).not.toThrow();
+    expect(game().phase).toBe('alive');
+    expect(game().pending).toHaveLength(0);
+    expect(hasEventSheet()).toBe(false);
+  });
+
+  it('ageUp() advances a life parked on awaitingChoice with nothing queued', () => {
+    useGameStore.getState().newLife({ slot: 1, seed: 9 });
+    stallOnEmptyChoice();
+    const age = game().character.age;
+
+    useGameStore.getState().ageUp();
+    expect(game().character.age).toBe(age + 1);
+  });
+
   it('restores an unfinished blackjack hand across a reload', () => {
     const adapter = memoryStorage();
     resetGameStoreForTests(adapter);
@@ -409,6 +471,57 @@ describe('review regressions', () => {
     resetGameStoreForTests(adapter);
     expect(useGameStore.getState().loadSlot(1)).toBe(true);
     expect(useGameStore.getState().casino).toBeNull();
+  });
+
+  /** Plants a raw table sidecar over a saved slot 1; what a reload adopts from it. */
+  function adoptSidecar(raw: string): BlackjackTable | null {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    setUpAdult();
+    adapter.setItem('ol.table.1', raw);
+
+    resetGameStoreForTests(adapter);
+    expect(useGameStore.getState().loadSlot(1)).toBe(true);
+    return useGameStore.getState().casino;
+  }
+
+  it('refuses a table sidecar that is not a whole open hand', () => {
+    const openHand = {
+      bet: 50,
+      player: ['A♠', '5♥'],
+      dealer: ['K♦'],
+      playerTotal: 16,
+      dealerTotal: 10,
+      done: false,
+      payout: 0,
+    };
+    // The gate is not a blanket no: an intact hand still comes back.
+    expect(adoptSidecar(JSON.stringify(openHand))).toEqual(openHand);
+
+    // The casino sheet maps over `dealer` during render and `blackjackStand`
+    // spreads it, with no error boundary above either: a table missing a field
+    // the consumers dereference must never reach live state.
+    expect(adoptSidecar(JSON.stringify({ ...openHand, dealer: undefined }))).toBeNull();
+    expect(adoptSidecar(JSON.stringify({ ...openHand, playerTotal: undefined }))).toBeNull();
+    expect(adoptSidecar(JSON.stringify({ ...openHand, dealerTotal: undefined }))).toBeNull();
+    expect(adoptSidecar(JSON.stringify({ ...openHand, payout: undefined }))).toBeNull();
+
+    // Card values are sliced to read their rank; a number has no `slice`.
+    expect(adoptSidecar(JSON.stringify({ ...openHand, player: [1, 5] }))).toBeNull();
+    expect(adoptSidecar(JSON.stringify({ ...openHand, dealer: [{ rank: 'K' }] }))).toBeNull();
+
+    // JSON carries no NaN, but an overflowing literal parses to Infinity, which
+    // is a `number` the payout arithmetic cannot use.
+    expect(
+      adoptSidecar(
+        '{"bet":1e999,"player":["A♠","5♥"],"dealer":["K♦"],"playerTotal":16,"dealerTotal":10,"done":false,"payout":0}'
+      )
+    ).toBeNull();
+
+    // `typeof null === 'object'`, so the null sidecar needs its own refusal.
+    expect(adoptSidecar('null')).toBeNull();
+    expect(adoptSidecar('[]')).toBeNull();
+    expect(adoptSidecar('not json')).toBeNull();
   });
 
   it('refuses to deal over an unfinished hand', () => {

@@ -3,7 +3,7 @@
  */
 
 import { currentYearLog } from '@/engine/ageUp';
-import { clampStat } from '@/engine/effects';
+import { clampMoney, clampStat } from '@/engine/effects';
 import { createRng, initialRngState } from '@/engine/rng';
 import type {
   Character,
@@ -35,6 +35,12 @@ const FALLBACK_LAST_NAME = 'Doe';
 
 /** Only rolled genders; `nonbinary` is reachable through `CreateLifeOptions`. */
 const ROLLED_GENDERS: readonly Gender[] = ['male', 'female'];
+
+/** Youngest either parent may have been when a sibling was born. */
+const MIN_PARENT_AGE = 16;
+
+/** Widest age a sibling is rolled into, before the parents narrow it. */
+const MAX_SIBLING_AGE = 10;
 
 const PRONOUNS: Record<Gender, Pronouns> = {
   male: { sub: 'he', obj: 'him', pos: 'his' },
@@ -285,11 +291,21 @@ export function createLife(reg: ContentRegistry, opts: CreateLifeOptions): GameS
     flags: {},
   });
 
+  /* Every sibling is older than the newborn, so a sibling's age is also how many
+     years to take off each parent's: rolled flat against 1-10 it mints mothers
+     who gave birth at 10. Derived once from whichever parent is younger, and
+     floored so a parent range ever widened downwards cannot invert the span.
+     `rng.int` spends its one draw at any width, so the cursor is unaffected. */
+  const oldestSiblingAge = Math.max(
+    1,
+    Math.min(MAX_SIBLING_AGE, Math.min(motherAge, fatherAge) - MIN_PARENT_AGE)
+  );
+
   const siblings = rng.int(0, 3);
   for (let i = 0; i < siblings; i += 1) {
     const siblingGender = rng.pick(ROLLED_GENDERS);
     const siblingName = rollFirstName(rng, pool, siblingGender);
-    const siblingAge = rng.int(1, 10);
+    const siblingAge = rng.int(1, oldestSiblingAge);
     const siblingRel = rng.int(55, 95);
     addPerson(state, {
       kind: 'sibling',
@@ -346,7 +362,10 @@ export function emigrateTo(
     return { ok: false, reason: 'cooldown' };
   }
 
-  c.money = Math.max(0, Math.round(c.money - VISA_FEE));
+  /* `clampMoney`, never `Math.max(0, ...)`: the affordability gate above cannot
+     refuse an unreadable balance, because every comparison against one is false,
+     so this write is what settles it. See the guard's own comment. */
+  c.money = clampMoney(c.money - VISA_FEE, c.money);
   c.flags.lastVisaAge = c.age;
 
   const rng = createRng(state);

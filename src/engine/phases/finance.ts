@@ -186,8 +186,25 @@ function incomeTax(gross: number, taxMult: number): number {
   return Math.round(owed * taxMult);
 }
 
+/**
+ * Whether the character has a roof of their own.
+ *
+ * `OwnedAsset` carries no type of its own, so only the registry can answer this,
+ * and a save naming a def this build no longer ships used to answer "owns
+ * nothing at all". Everything else here treats such an asset as owned —
+ * `revalueAssets` holds its value and bills `DEFAULT_UPKEEP` on it, `netWorth`
+ * and the estate count it — so giving up on it alone charged a homeowner `RENT`
+ * on the house they were living in, every year for the rest of the life, and
+ * kept one who still lived with their parents there until `MOVE_OUT_AGE`. The
+ * label is the fallback this side can afford: the content packs recover the same
+ * drifted row from its id prefix, which only content is allowed to know.
+ */
 function ownsProperty(reg: ContentRegistry, state: GameState): boolean {
-  return state.character.assets.some((asset) => findAsset(reg, asset.defId)?.type === 'property');
+  return state.character.assets.some(
+    (asset) =>
+      (findAsset(reg, asset.defId) ?? reg.assets.find((def) => def.label === asset.label))?.type ===
+      'property'
+  );
 }
 
 function hasSpouse(state: GameState): boolean {
@@ -658,7 +675,13 @@ export function buyAsset(
   }
 
   const property = def.type === 'property';
-  const minAge = def.minAge ?? (property ? PROPERTY_MIN_AGE : VEHICLE_MIN_AGE);
+  /* `??` answers for an absent minimum age only: NaN is a number, so it reached
+     the comparison, and `c.age < NaN` is false at every age — the same fail-open
+     shape the price gate above had to stop having, and the refusal it never
+     printed read "You must be NaN to buy that." `validateRegistry` lints an
+     asset's price but never its minAge, so nothing else catches the typo. */
+  const defaultMinAge = property ? PROPERTY_MIN_AGE : VEHICLE_MIN_AGE;
+  const minAge = contentNumber(def.minAge ?? defaultMinAge, defaultMinAge);
   if (c.age < minAge) return { ok: false, reason: `You must be ${minAge} to buy that.` };
 
   const down = withLoan ? Math.round(price * (property ? MORTGAGE_DOWN : AUTO_DOWN)) : price;

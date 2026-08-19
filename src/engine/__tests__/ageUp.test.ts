@@ -14,8 +14,8 @@ import type {
   YearLog,
 } from '@/types';
 
-/* Built by hand rather than through `buildRegistry`, which is another agent's
-   module and still a stub. */
+/* Every collection empty, so these tests exercise the engine on its own, with
+   no pack able to influence a draw. */
 function emptyRegistry(): ContentRegistry {
   return {
     packs: [],
@@ -66,12 +66,13 @@ function texts(entries: LogEntry[]): string[] {
 /* ---------------------------------------------------------------------------
    Stand-in phase chain.
 
-   Five of the eight phases belong to other agents and may still be stubs while
-   this suite runs, so the orchestration tests swap the whole chain for stand-ins
-   and re-import `ageUp` against them. `ownChain` puts the real `agingPhase` and
-   `deathCheckPhase` back, which is enough to play a whole life. Everything else
-   (`death`, `effects`, `rng`) stays real throughout, so the death protocol is
-   exercised end to end.
+   The orchestration tests assert what `ageUp` itself does — the order it calls
+   the phases in, the year it opens, how it handles a pending choice — so they
+   swap the whole chain for stand-ins whose behaviour the test controls and
+   re-import `ageUp` against them. `ownChain` puts the real `agingPhase` and
+   `deathCheckPhase` back, which is enough to play a whole life with no other
+   phase contributing draws. Everything else (`death`, `effects`, `rng`) stays
+   real throughout, so the death protocol is exercised end to end.
 --------------------------------------------------------------------------- */
 
 const PHASE_ORDER = [
@@ -142,24 +143,6 @@ function ownChain(): Promise<FakeChain> {
   });
 }
 
-/* One real-chain year, run at collection time: the phases owned by other agents
-   may still throw `TODO:`, in which case the integration tests below are skipped
-   rather than reported as failures of this module. */
-function probeRealChain(): string {
-  const reg = emptyRegistry();
-  try {
-    ageUp(newLife(1, reg), reg);
-    return '';
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-}
-
-const chainBlocker = probeRealChain();
-if (chainBlocker !== '') {
-  console.warn(`ageUp integration tests skipped; phase chain not ready: ${chainBlocker}`);
-}
-
 describe('currentYearLog', () => {
   it('returns the year the log is currently on', () => {
     const state = newLife(2);
@@ -198,7 +181,53 @@ describe('ageUp guard', () => {
   it('refuses to run while a choice is pending', () => {
     const state = newLife(6);
     state.phase = 'awaitingChoice';
+    state.pending = [
+      {
+        eventId: 'fork',
+        text: 'A fork in the road.',
+        icon: '🍴',
+        choices: [{ label: 'Go right' }],
+      },
+    ];
     expect(() => ageUp(state, emptyRegistry())).toThrow('ageUp while phase=awaitingChoice');
+    // The card is still up, so the answer can still be given.
+    expect(state.pending).toHaveLength(1);
+  });
+
+  /* Drifted save data: the phase says a card is up but the queue is empty. The
+     engine cannot mint that state, and nothing else can clear it — the store
+     answers cards through `resolveChoice` and returns before it when there is
+     none — so refusing it here would leave the life no legal move at all. */
+  it('repairs a phase parked on awaitingChoice with nothing queued', () => {
+    const drifted = newLife(6);
+    drifted.phase = 'awaitingChoice';
+    drifted.pending = [];
+
+    expect(() => ageUp(drifted, emptyRegistry())).not.toThrow();
+
+    expect(drifted.character.age).toBe(1);
+    expect(drifted.phase).toBe('alive');
+    expect(drifted.pending).toEqual([]);
+
+    /* There is no card, so the repair narrates nothing and rolls nothing: the
+       year is the one a life that was never parked would have played. */
+    const clean = newLife(6);
+    ageUp(clean, emptyRegistry());
+    expect(drifted.rngState).toBe(clean.rngState);
+    expect(drifted.log).toEqual(clean.log);
+  });
+
+  it('repairs an awaitingChoice save that carries no queue at all', () => {
+    // The neighbouring corruption: `pending` absent rather than empty.
+    const drifted = newLife(6);
+    drifted.phase = 'awaitingChoice';
+    drifted.pending = undefined as unknown as GameState['pending'];
+
+    ageUp(drifted, emptyRegistry());
+
+    expect(drifted.character.age).toBe(1);
+    expect(drifted.phase).toBe('alive');
+    expect(drifted.pending).toEqual([]);
   });
 });
 
@@ -1050,8 +1079,8 @@ describe('resolveChoice on a card the current content cannot resolve', () => {
 });
 
 /* ---------------------------------------------------------------------------
-   Whole lives: first against the phases this module owns, then — once the other
-   agents' phases exist — against the real chain.
+   Whole lives: first against the phases this module owns, then against the real
+   chain.
 --------------------------------------------------------------------------- */
 
 interface LifeRunner {
@@ -1167,7 +1196,12 @@ describe('the generation after', () => {
 });
 
 describe('a whole life on the real phase chain', () => {
-  it.skipIf(chainBlocker !== '')('replays identically from the same seed', () => {
+  it('runs a year without throwing', () => {
+    const reg = emptyRegistry();
+    expect(() => ageUp(newLife(1, reg), reg)).not.toThrow();
+  });
+
+  it('replays identically from the same seed', () => {
     const first = playToDeath(424242, emptyRegistry());
     const second = playToDeath(424242, emptyRegistry());
 
@@ -1176,7 +1210,7 @@ describe('a whole life on the real phase chain', () => {
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
   });
 
-  it.skipIf(chainBlocker !== '')('always ends by 110', () => {
+  it('always ends by 110', () => {
     for (const seed of [1, 424242, 987654]) {
       const state = playToDeath(seed, emptyRegistry());
       expect(state.phase).toBe('dead');
@@ -1187,7 +1221,7 @@ describe('a whole life on the real phase chain', () => {
     }
   });
 
-  it.skipIf(chainBlocker !== '')('logs one year per birthday', () => {
+  it('logs one year per birthday', () => {
     expectOneYearPerBirthday(playToDeath(424242, emptyRegistry()));
   });
 });

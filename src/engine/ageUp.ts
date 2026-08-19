@@ -61,13 +61,28 @@ function settleDeath(state: GameState, reg: ContentRegistry): boolean {
 }
 
 /**
- * Advances one year. Throws unless `phase === 'alive'`.
+ * Advances one year. Throws unless `phase === 'alive'`, having first repaired an
+ * `awaitingChoice` phase that has no card to answer.
  * Phases run in this fixed order: aging, health, education, relationships,
  * career, finance, events, deathCheck. A phase that kills the character halts
  * the remaining ones; a phase that queues a choice does not, so the year still
  * finishes and the queue is answered by `resolveChoice` afterwards.
  */
 export function ageUp(state: GameState, reg: ContentRegistry): void {
+  /* Repaired ahead of the guard: `awaitingChoice` with nothing queued is a state
+     the engine never mints — `eventsPhase` pushes the card and sets the phase in
+     one step, and both exits below recompute the phase from what is left — but a
+     save can carry it, and no other call can clear it: the store answers cards
+     through `resolveChoice` and returns before it when there is none. Refusing it
+     here as well would strand the life for good, which is what `discardPending`
+     exists to prevent. There is no card, so nothing to narrate and nothing to
+     roll: the repair costs no log line and no draw, and replays identically.
+     Widened because a save can also carry no queue at all. */
+  const queued: readonly PendingEvent[] | undefined = state.pending;
+  if (state.phase === 'awaitingChoice' && (queued === undefined || queued.length === 0)) {
+    state.pending = [];
+    state.phase = 'alive';
+  }
   if (state.phase !== 'alive') {
     throw new Error(`ageUp while phase=${state.phase}`);
   }

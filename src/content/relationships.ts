@@ -731,6 +731,9 @@ const interactions: InteractionDef[] = [
     icon: '🤝',
     minAge: 5,
     cooldownYears: 1,
+    /* `MEETING_PLACES` is a gym, a queue and a laundromat, none of which is a
+       cell; inside, `ev-prison-cellmate` is how the block hands out a friend. */
+    condition: free,
     resolve: (ctx: Ctx) => {
       const gender = ctx.rng.pick(ROLLED_GENDERS);
       const name = `${rollFirstName(ctx, gender)} ${rollLastName(ctx)}`.trim();
@@ -1173,7 +1176,7 @@ const events: EventDef[] = [
       return `${first} took three steps and landed on the dog bowl.`;
     },
     effects: [
-      relWith((state) => childAged(state, 0, 3), 6),
+      relWith((state) => childAged(state, 0, 2), 6),
       { kind: 'stat', stat: 'happiness', delta: 9 },
     ],
   },
@@ -1191,7 +1194,7 @@ const events: EventDef[] = [
       return `${first} graduated. You cried in the third row and denied it after.`;
     },
     effects: [
-      relWith((state) => childAged(state, 17, 20), 8),
+      relWith((state) => childAged(state, 17, 19), 8),
       { kind: 'stat', stat: 'happiness', delta: 10 },
       { kind: 'money', delta: -500 },
     ],

@@ -291,18 +291,34 @@ export function blackjackStand(state: GameState, table: BlackjackTable): Blackja
 /* Slots                                                               */
 /* ------------------------------------------------------------------ */
 
-const SLOT_SYMBOLS: readonly string[] = ['🍒', '🍋', '🔔', '💎', '7️⃣'];
+/** The reel strip; every reel is drawn from it independently. */
+export const SLOT_SYMBOLS: readonly string[] = ['🍒', '🍋', '🔔', '💎', '7️⃣'];
 const SEVEN = '7️⃣';
 const DIAMOND = '💎';
 
 const MIN_SLOT_BET = 5;
 const MAX_SLOT_BET = 1000;
-const TRIPLE_SEVEN_MULT = 50;
-const TRIPLE_DIAMOND_MULT = 20;
-const TRIPLE_MULT = 10;
-const PAIR_MULT = 2;
-/** A spin worth ten stakes or more is loud enough to belong in the life feed. */
-const SLOT_LOG_MULT = 10;
+/**
+ * The paytable, in stakes paid back. Three reels over five symbols make 125
+ * equally likely lines — 1 all sevens, 1 all diamonds, 3 another triple, 60 a
+ * single pair — so the machine returns (30 + 12 + 3×5 + 60×1) / 125 = 0.936
+ * stakes per stake wagered.
+ *
+ * Two constraints ride on these numbers, and the pack test pins both. The
+ * return has to stay under 1: nothing caps how often the handle may be pulled —
+ * no cooldown, no yearly cap, no interaction gate — so a machine paying more
+ * than it takes is not a game but an unlimited wallet, and every money-gated
+ * mechanic in the run is defeated by holding down one button. And
+ * `TRIPLE_SEVEN_MULT` has to stay unique among these, because the jackpot flag
+ * is set by comparing the multiplier a spin paid against it.
+ */
+const TRIPLE_SEVEN_MULT = 30;
+const TRIPLE_DIAMOND_MULT = 12;
+const TRIPLE_MULT = 5;
+/** A pair hands the stake back: the reels teased, the wallet stayed put. */
+const PAIR_MULT = 1;
+/** Every triple is loud enough for the life feed; a pair is not news. */
+const SLOT_LOG_MULT = TRIPLE_MULT;
 const SPIN_ADDICTION = 1;
 
 const SLOTS_ICON = '🎰';
@@ -318,8 +334,11 @@ function refusedSpin(): SlotsResult {
   return { reels: ['🚫', '🚫', '🚫'], payout: 0 };
 }
 
-/** Stakes won on one line: three 7s, three diamonds, any other triple, or a pair. */
-function slotMultiplier(reels: readonly [string, string, string]): number {
+/**
+ * Stakes paid on one line: three 7s, three diamonds, any other triple, or a
+ * pair, which pays the stake back and nothing on top of it.
+ */
+export function slotMultiplier(reels: readonly [string, string, string]): number {
   const [left, middle, right] = reels;
   if (left === middle && middle === right) {
     if (left === SEVEN) return TRIPLE_SEVEN_MULT;
@@ -372,14 +391,25 @@ export function spinSlots(
 /* Lottery                                                             */
 /* ------------------------------------------------------------------ */
 
-const TICKET_PRICE = 5;
+export const TICKET_PRICE = 5;
 
-/** Prize tiers, longest odds first; one draw walks them as disjoint bands. */
-const LOTTERY_TIERS: readonly { chance: number; prize: number; joy: number }[] = [
-  { chance: 0.00005, prize: 2000000, joy: 15 },
-  { chance: 0.0002, prize: 50000, joy: 8 },
-  { chance: 0.002, prize: 500, joy: 3 },
-  { chance: 0.02, prize: 20, joy: 1 },
+/**
+ * Prize tiers, longest odds first; one draw walks them as disjoint bands, so a
+ * tier's chance is exactly the width of its band and the odds read straight off
+ * the table: 1 in 5,000,000, 1 in 50,000, 1 in 2,000, 1 in 25.
+ *
+ * The constraint the slot paytable carries applies here too, and harder: a
+ * ticket has no cooldown, no per-year cap and no interaction gate, so nothing
+ * stands between the player and an unlimited bankroll except the expected prize
+ * being smaller than the price. It comes to $2.45 on a $5 ticket
+ * (0.0000002×2,000,000 + 0.00002×50,000 + 0.0005×500 + 0.04×20) — a 49% return,
+ * about what a real lottery pays back. The pack test pins it under the price.
+ */
+export const LOTTERY_TIERS: readonly { chance: number; prize: number; joy: number }[] = [
+  { chance: 0.0000002, prize: 2000000, joy: 15 },
+  { chance: 0.00002, prize: 50000, joy: 8 },
+  { chance: 0.0005, prize: 500, joy: 3 },
+  { chance: 0.04, prize: 20, joy: 1 },
 ];
 
 /** A win worth telling the life feed about. */
@@ -387,8 +417,10 @@ const LOTTERY_LOG_PRIZE = 500;
 /**
  * A win the achievement wall counts as beating the odds, which is why it sits
  * at the $50,000 tier rather than the $2,000,000 one: `ach-lottery-winner`
- * reads `casino:lotteryWin`, and hanging it on a 1-in-20,000 draw alone would
- * make it an achievement nobody ever sees.
+ * reads `casino:lotteryWin`, and hanging it on the jackpot alone would make it
+ * an achievement nobody ever sees. Odds long enough to keep the ticket honest
+ * make even this tier a rare sight from the casino, which is why the adult
+ * sidewalk-ticket event sets the same flag on its own top outcome.
  */
 const LOTTERY_WIN_PRIZE = 50000;
 

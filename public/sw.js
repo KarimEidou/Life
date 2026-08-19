@@ -9,7 +9,11 @@
  * depends on bumping it.
  */
 
-const CACHE = 'ol-v2';
+// Cache Storage is keyed by origin, not by worker scope: on GitHub Pages every
+// project site shares https://<user>.github.io, so the activate purge must only
+// touch this app's own caches or it wipes unrelated apps' offline storage.
+const CACHE_PREFIX = 'ol-';
+const CACHE = `${CACHE_PREFIX}v2`;
 const SHELL = ['.', 'index.html', 'manifest.webmanifest', 'icons/icon-180.png'];
 
 self.addEventListener('install', (event) => {
@@ -21,7 +25,13 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE)
+            .map((key) => caches.delete(key)),
+        ),
+      )
       .then(() => self.clients.claim()),
   );
 });
@@ -32,11 +42,19 @@ function isShellRequest(request) {
   return path.endsWith('/') || path.endsWith('/index.html');
 }
 
-async function networkFirst(request) {
+// A bare cache.put() is not tracked by the fetch event, so the browser may
+// terminate the worker mid-write and leave the entry missing; it also rejects on
+// quota exhaustion and on 206 responses (which response.ok admits), with nothing
+// to handle the rejection. waitUntil keeps the worker alive for the write.
+function cacheResponse(event, cache, request, response) {
+  event.waitUntil(cache.put(request, response.clone()).catch(() => {}));
+}
+
+async function networkFirst(event, request) {
   const cache = await caches.open(CACHE);
   try {
     const response = await fetch(request);
-    if (response.ok) cache.put(request, response.clone());
+    if (response.ok) cacheResponse(event, cache, request, response);
     return response;
   } catch (err) {
     const cached = (await cache.match(request)) ?? (await cache.match('index.html'));
@@ -45,12 +63,12 @@ async function networkFirst(request) {
   }
 }
 
-async function cacheFirst(request) {
+async function cacheFirst(event, request) {
   const cache = await caches.open(CACHE);
   const cached = await cache.match(request);
   if (cached) return cached;
   const response = await fetch(request);
-  if (response.ok) cache.put(request, response.clone());
+  if (response.ok) cacheResponse(event, cache, request, response);
   return response;
 }
 
@@ -58,5 +76,7 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
   if (new URL(request.url).origin !== self.location.origin) return;
-  event.respondWith(isShellRequest(request) ? networkFirst(request) : cacheFirst(request));
+  event.respondWith(
+    isShellRequest(request) ? networkFirst(event, request) : cacheFirst(event, request),
+  );
 });

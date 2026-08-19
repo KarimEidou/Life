@@ -1,12 +1,18 @@
-import { useEffect, useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
 
 import { useGameStore } from '@/store/gameStore';
 import { LOG_KIND_COLOR } from '@/ui/lib/feed';
 
 const feedStyle: CSSProperties = {
+  /* flex-basis 0, so the feed takes every pixel the fixed panels leave over.
+     The floor matters at short (landscape) viewports, where that leftover is
+     negative: without it the feed is flexed to 0px and the life story becomes
+     invisible, since the sibling panels cannot shrink below their content.
+     Holding 140px instead makes LifeScreen's column overflow, which its own
+     `overflowY: 'auto'` then scrolls. */
   flex: 1,
-  minHeight: 0,
+  minHeight: 140,
   overflowY: 'auto',
   padding: 'var(--sp-4)',
 };
@@ -35,8 +41,10 @@ export function Feed(): ReactElement | null {
 
   /* `game` gets a fresh identity on every commit while `game.log` is mutated
      in place, so the game object itself is the dependable signal that the log
-     may have grown. */
-  useEffect(() => {
+     may have grown. A layout effect, not a passive one: the browser paints
+     before passive effects run, so an age-up would show one frame with the new
+     entries below the fold and then jump. */
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el !== null) {
       el.scrollTop = el.scrollHeight;

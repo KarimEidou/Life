@@ -189,6 +189,79 @@ describe('saveGame / loadGame', () => {
     expect(loadGame(storage, 3)).toEqual({ ok: false, reason: 'future' });
   });
 
+  it('reports a save whose character is an empty object as corrupt', () => {
+    /* `loadGame` is the only validation boundary for this data and nothing above
+       the screens catches a render throw, so an `ok` verdict here is a blank app
+       the player can only escape by deleting the slot: the header reads
+       `character.job.title` the moment `job` is anything but exactly `null`. */
+    const storage = memoryStorage();
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({
+        version: SAVE_VERSION,
+        savedAt: 0,
+        slot: 1,
+        state: { character: { firstName: 'Ada', lastName: 'Byron', age: 30, money: 0 } },
+      })
+    );
+    expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'corrupt' });
+  });
+
+  it('rejects a save missing any one container the app dereferences unguarded', () => {
+    const storage = memoryStorage();
+    const write = (state: unknown): void => {
+      storage.setItem(
+        'ol.save.1',
+        JSON.stringify({ version: SAVE_VERSION, savedAt: 1, slot: 1, state })
+      );
+    };
+    const drifted = (): Record<string, unknown> =>
+      JSON.parse(JSON.stringify(fixture('Ada'))) as Record<string, unknown>;
+
+    // The intact fixture has to pass, or every case below succeeds vacuously.
+    write(drifted());
+    expect(loadGame(storage, 1).ok).toBe(true);
+
+    for (const key of [
+      'character',
+      'people',
+      'log',
+      'pending',
+      'firedEvents',
+      'interactionUse',
+      'ancestors',
+      'phase',
+    ]) {
+      const state = drifted();
+      delete state[key];
+      write(state);
+      expect(loadGame(storage, 1), `state.${key}`).toEqual({ ok: false, reason: 'corrupt' });
+    }
+
+    for (const key of [
+      'stats',
+      'education',
+      'pronouns',
+      'flags',
+      'investments',
+      'addictions',
+      'assets',
+      'loans',
+      'illnesses',
+      'job',
+      'prison',
+    ]) {
+      const state = drifted();
+      delete (state.character as Record<string, unknown>)[key];
+      write(state);
+      expect(loadGame(storage, 1), `character.${key}`).toEqual({ ok: false, reason: 'corrupt' });
+    }
+
+    // `job` and `prison` are legitimately null; absent is what breaks the header.
+    write(fixture('Ada', { character: { ...fixture('Ada').character, job: null } }));
+    expect(loadGame(storage, 1).ok).toBe(true);
+  });
+
   it('still reports a same-or-older save with a bad shape as corrupt', () => {
     const storage = memoryStorage();
     storage.setItem(
@@ -231,6 +304,35 @@ describe('migrations', () => {
 
     // Without a step for the gap the save is unreadable rather than half-migrated.
     expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'corrupt' });
+  });
+
+  it('runs the chain before the shape gate, so a step can create `character`', () => {
+    /* The gate used to run first, which put the one reshape a migration most
+       plausibly has to perform — introducing, renaming or moving a top-level
+       key — out of reach: the save was reported `corrupt`, and the player
+       offered Delete, before the step that repairs it ever ran. */
+    const storage = memoryStorage();
+    const modern = fixture('Ada');
+    const legacy: Record<string, unknown> = { ...modern };
+    delete legacy.character;
+    legacy.hero = modern.character;
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION - 1, savedAt: 1, slot: 1, state: legacy })
+    );
+
+    migrations[SAVE_VERSION] = (old: unknown): unknown => {
+      const { hero, ...rest } = old as Record<string, unknown>;
+      return { ...rest, character: hero };
+    };
+
+    try {
+      const state = loadedState(storage, 1);
+      expect(state).toEqual(modern);
+      expect('hero' in (state as unknown as Record<string, unknown>)).toBe(false);
+    } finally {
+      delete migrations[SAVE_VERSION];
+    }
   });
 });
 
@@ -275,6 +377,81 @@ describe('listSlots', () => {
     const target = listSlots(storage)[0].slot;
     saveGame(storage, target, fixture('Ada', { phase: 'dead' }));
     expect(listSlots(storage).find((s) => s.slot === target)?.dead).toBe(true);
+  });
+
+  it('keeps a slot from a newer build occupied even when its state shape differs', () => {
+    /* An empty row is offered straight to the create screen, which overwrites the
+       slot without a confirmation, so every envelope `loadGame` answers `future`
+       for has to stay occupied whether this build can shape-check it or not. */
+    const storage = memoryStorage();
+    const newer = SAVE_VERSION + 98;
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: newer, savedAt: 1, slot: 1, state: { hero: {} } })
+    );
+    storage.setItem('ol.save.2', JSON.stringify({ version: newer, savedAt: 2, slot: 2, state: 7 }));
+    storage.setItem('ol.save.3', JSON.stringify({ version: newer, savedAt: 3, slot: 3 }));
+
+    const slots = listSlots(storage);
+    for (const slot of [1, 2, 3]) {
+      expect(loadGame(storage, slot)).toEqual({ ok: false, reason: 'future' });
+      expect(slots.find((s) => s.slot === slot)).toEqual({ slot, empty: false, savedAt: slot });
+    }
+  });
+
+  it('still summarises a newer save whose shape this build can read', () => {
+    const storage = memoryStorage();
+    saveGame(storage, 1, fixture('Ada'));
+    const env = readRaw(storage, 1);
+    env.version = SAVE_VERSION + 1;
+    storage.setItem('ol.save.1', JSON.stringify(env));
+
+    const summary = listSlots(storage).find((s) => s.slot === 1);
+    expect(summary?.empty).toBe(false);
+    expect(summary?.name).toBe('Ada Byron');
+    expect(summary?.age).toBe(34);
+  });
+
+  it('reports no name at all when the stored character has none', () => {
+    /* The load menu titles a row and its confirmation alert `name ?? 'Saved
+       life'`, so an empty string would render both blank rather than falling
+       back. */
+    const storage = memoryStorage();
+    const nameless = { firstName: 7, lastName: null };
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION, savedAt: 1, slot: 1, state: { character: nameless } })
+    );
+    storage.setItem(
+      'ol.save.2',
+      JSON.stringify({
+        version: SAVE_VERSION,
+        savedAt: 2,
+        slot: 2,
+        state: { character: { firstName: '  ', lastName: '' } },
+      })
+    );
+
+    const slots = listSlots(storage);
+    for (const slot of [1, 2]) {
+      const summary = slots.find((s) => s.slot === slot);
+      expect(summary?.empty).toBe(false);
+      expect(summary?.name).toBeUndefined();
+    }
+  });
+
+  it('trims a half-named character rather than padding it', () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({
+        version: SAVE_VERSION,
+        savedAt: 1,
+        slot: 1,
+        state: { character: { firstName: 'Ada' } },
+      })
+    );
+    expect(listSlots(storage).find((s) => s.slot === 1)?.name).toBe('Ada');
   });
 
   it('treats an unreadable slot as empty instead of throwing', () => {

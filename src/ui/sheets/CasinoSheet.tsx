@@ -105,6 +105,10 @@ export function CasinoSheet(): ReactElement | null {
 
   // A refused deal leaves an inert, empty table in the store; treat it as none.
   const table = casino !== null && casino.player.length > 0 ? casino : null;
+  /* `BlackjackTable.payout` is stake-inclusive, while the life feed logs
+     `payout - bet` for the same hand, so the banner shows that net instead:
+     the two places a player reads one hand have to agree. */
+  const handNet = table !== null ? table.payout - table.bet : 0;
 
   const deal = (): void => {
     useGameStore.getState().startBlackjack(Number(blackjackBet));
@@ -205,7 +209,10 @@ export function CasinoSheet(): ReactElement | null {
                     <span style={strongStyle}>
                       {table.result !== undefined ? RESULT_TEXT[table.result] : 'Hand over.'}
                     </span>
-                    <MoneyText value={table.payout} />
+                    <span>
+                      {handNet > 0 ? '+' : ''}
+                      <MoneyText value={handNet} />
+                    </span>
                   </div>
                   <Button
                     testId="casino-new-hand"
