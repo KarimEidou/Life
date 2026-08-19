@@ -12,6 +12,9 @@ const rootStyle: CSSProperties = {
   overflowY: 'auto',
   alignItems: 'center',
   padding: 'var(--sp-6) var(--sp-4)',
+  /* Clear the status bar and home indicator. */
+  paddingTop: 'calc(var(--safe-top) + var(--sp-6))',
+  paddingBottom: 'calc(var(--safe-bottom) + var(--sp-6))',
 };
 
 /* Auto vertical margins centre a short obituary and give way to scrolling

@@ -29,6 +29,8 @@ const rootStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   height: '100%',
+  /* Content runs under the translucent status bar. */
+  paddingTop: 'var(--safe-top)',
 };
 
 const bodyStyle: CSSProperties = {
@@ -43,6 +45,8 @@ const bodyStyle: CSSProperties = {
 
 const footerStyle: CSSProperties = {
   padding: 'var(--sp-4)',
+  /* Clear the home indicator. */
+  paddingBottom: 'calc(var(--safe-bottom) + var(--sp-4))',
 };
 
 /** Reads an optional `?seed=` override for reproducible test lives. */

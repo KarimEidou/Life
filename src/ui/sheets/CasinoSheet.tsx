@@ -123,6 +123,12 @@ export function CasinoSheet(): ReactElement | null {
   };
 
   const buyTicket = (): void => {
+    // The engine reports a refused ticket exactly like a losing one, so
+    // pre-empt the only refusal cause here instead of showing 'No luck.'
+    if (c.money < 5) {
+      useUiStore.getState().addToast({ icon: '🚫', title: "You can't afford a ticket." });
+      return;
+    }
     setLottery(useGameStore.getState().buyLottery());
   };
 

@@ -58,25 +58,34 @@ test('a job can be taken', async ({ page }) => {
   await startLife(page, 4567);
   await ageYears(page, 20);
 
-  await page.getByTestId('tab-occupation').click();
-  const sheet = page.getByTestId('sheet-occupation');
-  await expect(sheet).toBeVisible();
+  // Interviews can be failed, so keep applying (aging a year between rounds)
+  // until the current-job card — and its Quit button — proves employment.
+  let hired = false;
+  for (let round = 0; round < 6 && !hired; round += 1) {
+    await page.getByTestId('tab-occupation').click();
+    const sheet = page.getByTestId('sheet-occupation');
+    await expect(sheet).toBeVisible();
 
-  const jobRows = sheet.locator('[data-testid^="job-row-"]');
-  await expect(jobRows.first()).toBeVisible();
-  const count = await jobRows.count();
-  let applied = false;
-  for (let i = 0; i < count; i += 1) {
-    const row = jobRows.nth(i);
-    if (await row.isEnabled()) {
-      await row.click();
-      applied = true;
-      break;
+    if (await sheet.getByTestId('job-quit').isVisible()) {
+      hired = true;
+    } else {
+      const jobRows = sheet.locator('[data-testid^="job-row-"]');
+      await expect(jobRows.first()).toBeVisible();
+      const count = await jobRows.count();
+      for (let i = 0; i < count; i += 1) {
+        await jobRows.nth(i).click();
+        if (await sheet.getByTestId('job-quit').isVisible()) {
+          hired = true;
+          break;
+        }
+      }
+    }
+    await closeSheet(page, 'occupation');
+    if (!hired) {
+      await ageYears(page, 1);
     }
   }
-  // A failed interview is fine — the application interaction itself must work.
-  expect(applied).toBe(true);
-  await closeSheet(page, 'occupation');
+  expect(hired).toBe(true);
 });
 
 test('theme and reduce motion apply', async ({ page }) => {

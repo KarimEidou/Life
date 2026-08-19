@@ -8,8 +8,8 @@ const rootStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: 'var(--sp-4)',
+  /* The sheet panel already pads for the home indicator. */
   padding: 'var(--sp-5)',
-  paddingBottom: 'calc(var(--safe-bottom) + var(--sp-5))',
   overflowY: 'auto',
   minHeight: 0,
 };
@@ -45,6 +45,11 @@ export function EventSheet(): ReactElement | null {
     return null;
   }
 
+  /* Drifted save data can carry a card with no choices; offering Continue
+     routes it into the engine's discard recovery instead of trapping the
+     life behind a button-less, non-dismissible sheet. */
+  const choices = card.choices ?? [];
+
   return (
     <div data-testid="sheet-event" style={rootStyle}>
       {/* Keyed by the event so a queued follow-up card renders fresh. */}
@@ -55,7 +60,7 @@ export function EventSheet(): ReactElement | null {
         <p data-testid="event-sheet-text" style={textStyle}>
           {card.text}
         </p>
-        {card.choices.map((choice, index) => (
+        {choices.map((choice, index) => (
           <Button
             key={index}
             variant="tinted"
@@ -69,6 +74,19 @@ export function EventSheet(): ReactElement | null {
             {choice.label}
           </Button>
         ))}
+        {choices.length === 0 ? (
+          <Button
+            variant="tinted"
+            size="lg"
+            fullWidth
+            testId="event-choice-0"
+            onClick={() => {
+              useGameStore.getState().choose(0);
+            }}
+          >
+            Continue
+          </Button>
+        ) : null}
       </div>
     </div>
   );

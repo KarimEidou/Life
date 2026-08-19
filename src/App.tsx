@@ -9,6 +9,7 @@ import { useUiStore } from '@/store/uiStore';
 import type { ScreenId, SheetId, ToastItem } from '@/store/uiStore';
 
 import { CreateScreen } from '@/ui/create/CreateScreen';
+import { useEffectiveReduceMotion } from '@/ui/lib/motion';
 import { DeathScreen } from '@/ui/death/DeathScreen';
 import { LifeScreen } from '@/ui/life/LifeScreen';
 import { SaveSlotsScreen } from '@/ui/slots/SaveSlotsScreen';
@@ -77,7 +78,7 @@ const TOAST_MS = 2500;
 function SheetHost(): ReactElement {
   const sheets = useUiStore((s) => s.sheets);
   const popSheet = useUiStore((s) => s.popSheet);
-  const reduceMotion = useUiStore((s) => s.settings.reduceMotion);
+  const reduceMotion = useEffectiveReduceMotion();
 
   return (
     <AnimatePresence>
@@ -130,7 +131,7 @@ function TimedToast({ item, reduceMotion }: { item: ToastItem; reduceMotion: boo
 /** Renders the ui store's toast queue; each dismisses itself or on tap. */
 function ToastHost(): ReactElement {
   const toasts = useUiStore((s) => s.toasts);
-  const reduceMotion = useUiStore((s) => s.settings.reduceMotion);
+  const reduceMotion = useEffectiveReduceMotion();
 
   return (
     <div style={toastHostStyle}>

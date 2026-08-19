@@ -21,7 +21,13 @@ const itemStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
+  justifyContent: 'center',
   gap: 2,
+  /* Tab items are primary navigation: give each a real thumb target. */
+  flex: 1,
+  minWidth: 44,
+  minHeight: 44,
+  padding: 'var(--sp-1)',
   fontSize: 'var(--fs-caption)',
 };
 

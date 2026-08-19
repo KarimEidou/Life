@@ -21,6 +21,9 @@ const rootStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   height: '100%',
+  /* At very short (landscape) viewports the fixed panels exceed the screen;
+     letting the column scroll keeps the tab bar reachable. */
+  overflowY: 'auto',
 };
 
 const emptyRootStyle: CSSProperties = {

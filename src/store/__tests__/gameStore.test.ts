@@ -342,3 +342,82 @@ describe('slotSummaries', () => {
     expect(useGameStore.getState()).toBe(before);
   });
 });
+
+describe('review regressions', () => {
+  /** An adult with a bankroll; the direct mutation is committed via a cheap action. */
+  function setUpAdult(): void {
+    useGameStore.getState().newLife({ slot: 1, seed: 21 });
+    game().character.age = 25;
+    game().character.money = 5000;
+    useGameStore.getState().setWorkHard(false);
+  }
+
+  /** Deals until a hand survives the deal (an immediate blackjack settles). */
+  function dealOpenHand(): void {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      useGameStore.getState().startBlackjack(50);
+      if (!casinoTable().done) {
+        return;
+      }
+      useGameStore.getState().clearCasino();
+    }
+    throw new Error('never dealt an open hand');
+  }
+
+  it('discards a drifted zero-choice card instead of stranding the life', () => {
+    useGameStore.getState().newLife({ slot: 1, seed: 9 });
+    // Simulate a save written with a card that offers no choices at all.
+    game().pending.push({ eventId: 'drifted', text: 'A moment passes.', icon: '❓', choices: [] });
+    game().phase = 'awaitingChoice';
+    useGameStore.getState().choose(0);
+    expect(game().phase).toBe('alive');
+    expect(game().pending).toHaveLength(0);
+    expect(hasEventSheet()).toBe(false);
+  });
+
+  it('restores an unfinished blackjack hand across a reload', () => {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    setUpAdult();
+    dealOpenHand();
+    const open = casinoTable();
+    const bankAfterDeal = game().character.money;
+
+    // A reload: fresh store over the same storage, then continue the slot.
+    resetGameStoreForTests(adapter);
+    expect(useGameStore.getState().loadSlot(1)).toBe(true);
+    const restored = casinoTable();
+    expect(restored.bet).toBe(open.bet);
+    expect(restored.player).toEqual(open.player);
+    expect(game().character.money).toBe(bankAfterDeal);
+
+    // The restored hand still settles and pays out of the loaded balance.
+    while (!casinoTable().done) {
+      useGameStore.getState().blackjackStand();
+    }
+    expect(game().character.money).toBe(bankAfterDeal + casinoTable().payout);
+  });
+
+  it('drops the sidecar once the hand settles', () => {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    setUpAdult();
+    dealOpenHand();
+    while (!casinoTable().done) {
+      useGameStore.getState().blackjackStand();
+    }
+    resetGameStoreForTests(adapter);
+    expect(useGameStore.getState().loadSlot(1)).toBe(true);
+    expect(useGameStore.getState().casino).toBeNull();
+  });
+
+  it('refuses to deal over an unfinished hand', () => {
+    setUpAdult();
+    dealOpenHand();
+    const open = casinoTable();
+    const bank = game().character.money;
+    useGameStore.getState().startBlackjack(50);
+    expect(useGameStore.getState().casino).toBe(open);
+    expect(game().character.money).toBe(bank);
+  });
+});

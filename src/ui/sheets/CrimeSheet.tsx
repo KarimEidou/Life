@@ -53,7 +53,11 @@ export function CrimeSheet(): ReactElement | null {
           <div style={cardColStyle}>
             <div style={strongStyle}>In prison for {prison.crime}</div>
             <ProgressBar
-              value={((prison.totalYears - prison.yearsLeft) / prison.totalYears) * 100}
+              value={
+                prison.totalYears > 0
+                  ? ((prison.totalYears - prison.yearsLeft) / prison.totalYears) * 100
+                  : 100
+              }
               animated
             />
             <div style={metaStyle}>

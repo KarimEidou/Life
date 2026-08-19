@@ -121,6 +121,48 @@ function readUnlocked(): string[] {
   }
 }
 
+/* An unfinished blackjack hand is app-layer state, not part of the engine's
+   save envelope — but its stake is already charged and autosaved, so the
+   table rides in a sidecar key and is restored on load instead of being
+   silently forfeited by a mid-hand reload. */
+function tableKey(slot: number): string {
+  return `ol.table.${String(slot)}`;
+}
+
+function writeTableSidecar(slot: number | null, table: BlackjackTable | null): void {
+  if (slot === null) {
+    return;
+  }
+  try {
+    if (table === null || table.done) {
+      storage.removeItem(tableKey(slot));
+    } else {
+      storage.setItem(tableKey(slot), JSON.stringify(table));
+    }
+  } catch {
+    // The hand simply does not survive a reload this session.
+  }
+}
+
+function readTableSidecar(slot: number): BlackjackTable | null {
+  try {
+    const raw = storage.getItem(tableKey(slot));
+    if (raw === null) {
+      return null;
+    }
+    const table = JSON.parse(raw) as BlackjackTable;
+    const openHand =
+      typeof table === 'object' &&
+      Array.isArray(table.player) &&
+      table.player.length > 0 &&
+      table.done === false &&
+      typeof table.bet === 'number';
+    return openHand ? table : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Sends the UI wherever the life's phase demands after a mutation. */
 function routePhase(game: GameState): void {
   const ui = useUiStore.getState();
@@ -203,6 +245,7 @@ export const useGameStore = create<GameStore>()((set, get) => {
         gender: opts.gender,
         countryId: opts.countryId,
       });
+      writeTableSidecar(opts.slot, null);
       set({ game, slot: opts.slot, casino: null });
       commit(game);
       useUiStore.getState().setScreen('life');
@@ -219,7 +262,7 @@ export const useGameStore = create<GameStore>()((set, get) => {
       if (!result.ok) {
         return false;
       }
-      set({ game: result.state, slot, casino: null });
+      set({ game: result.state, slot, casino: readTableSidecar(slot) });
       const ui = useUiStore.getState();
       ui.closeAllSheets();
       ui.setScreen('life');
@@ -234,6 +277,7 @@ export const useGameStore = create<GameStore>()((set, get) => {
       } catch {
         // Nothing readable to erase.
       }
+      writeTableSidecar(slot, null);
       if (get().slot === slot) {
         set({ game: null, slot: null, casino: null });
       }
@@ -266,7 +310,15 @@ export const useGameStore = create<GameStore>()((set, get) => {
         return;
       }
       const card: PendingEvent | undefined = game.pending[0];
-      if (card === undefined || card.choices[index] === undefined) {
+      if (card === undefined) {
+        return;
+      }
+      /* Only a populated card with an out-of-range index is refused (the
+         engine would throw). A card with no choices — drifted save data —
+         must still reach resolveChoice, whose discard path is the designed
+         recovery for exactly that card. */
+      const choices: PendingEvent['choices'] | undefined = card.choices;
+      if (choices !== undefined && choices.length > 0 && choices[index] === undefined) {
         return;
       }
       resolveChoice(game, getRegistry(), index);
@@ -432,12 +484,17 @@ export const useGameStore = create<GameStore>()((set, get) => {
 
     /** Deals a hand and holds the table in `casino` until it is cleared. */
     startBlackjack: (bet: number): void => {
-      const game = get().game;
+      const { game, casino } = get();
       if (game === null) {
+        return;
+      }
+      // Dealing over an unfinished hand would silently forfeit its stake.
+      if (casino !== null && !casino.done) {
         return;
       }
       const table = gambling.startBlackjack(game, getRegistry(), bet);
       commit(game, { casino: table });
+      writeTableSidecar(get().slot, table);
     },
 
     blackjackHit: (): void => {
@@ -445,7 +502,9 @@ export const useGameStore = create<GameStore>()((set, get) => {
       if (game === null || casino === null || casino.done) {
         return;
       }
-      commit(game, { casino: gambling.blackjackHit(game, casino) });
+      const table = gambling.blackjackHit(game, casino);
+      commit(game, { casino: table });
+      writeTableSidecar(get().slot, table);
     },
 
     blackjackStand: (): void => {
@@ -453,11 +512,14 @@ export const useGameStore = create<GameStore>()((set, get) => {
       if (game === null || casino === null || casino.done) {
         return;
       }
-      commit(game, { casino: gambling.blackjackStand(game, casino) });
+      const table = gambling.blackjackStand(game, casino);
+      commit(game, { casino: table });
+      writeTableSidecar(get().slot, table);
     },
 
     /** Drops the finished table so the casino sheet returns to its menu. */
     clearCasino: (): void => {
+      writeTableSidecar(get().slot, null);
       set({ casino: null });
     },
 
@@ -494,6 +556,7 @@ export const useGameStore = create<GameStore>()((set, get) => {
         // The UI only offers living children; a stale id is ignored.
         return;
       }
+      writeTableSidecar(get().slot, null);
       set({ game: next, casino: null });
       commit(next);
       const ui = useUiStore.getState();
@@ -523,6 +586,16 @@ export const useGameStore = create<GameStore>()((set, get) => {
     },
   };
 });
+
+/** Why a slot refuses to load, for UI copy; null when it would load fine. */
+export function slotLoadFailure(slot: number): 'empty' | 'corrupt' | 'future' | null {
+  try {
+    const result = loadGame(storage, slot);
+    return result.ok ? null : result.reason;
+  } catch {
+    return 'corrupt';
+  }
+}
 
 /** Swaps the storage adapter and clears any loaded life; tests only. */
 export function resetGameStoreForTests(adapter?: StorageAdapter): void {

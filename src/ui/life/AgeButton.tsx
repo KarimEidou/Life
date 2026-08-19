@@ -2,7 +2,7 @@ import { motion } from 'framer-motion';
 import type { CSSProperties, ReactElement } from 'react';
 
 import { useGameStore } from '@/store/gameStore';
-import { useUiStore } from '@/store/uiStore';
+import { useEffectiveReduceMotion } from '@/ui/lib/motion';
 
 const buttonStyle: CSSProperties = {
   width: '100%',
@@ -18,7 +18,7 @@ const buttonStyle: CSSProperties = {
 /** The big green button that advances the year (or re-opens a pending choice). */
 export function AgeButton(): ReactElement | null {
   const phase = useGameStore((s) => s.game?.phase);
-  const reduceMotion = useUiStore((s) => s.settings.reduceMotion);
+  const reduceMotion = useEffectiveReduceMotion();
   if (phase === undefined || phase === 'dead') {
     return null;
   }

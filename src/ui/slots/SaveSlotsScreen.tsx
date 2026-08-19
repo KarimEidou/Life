@@ -3,7 +3,7 @@ import type { CSSProperties, ReactElement } from 'react';
 
 import { Alert, Button, Card, ListRow, NavBar } from '@/design-system';
 import { fmtMoneyCompact } from '@/engine/format';
-import { useGameStore } from '@/store/gameStore';
+import { slotLoadFailure, useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
 import type { SlotSummary } from '@/types';
 
@@ -11,6 +11,8 @@ const rootStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   height: '100%',
+  /* Content runs under the translucent status bar. */
+  paddingTop: 'var(--safe-top)',
 };
 
 const bodyStyle: CSSProperties = {
@@ -42,7 +44,12 @@ export function SaveSlotsScreen(): ReactElement {
     setConfirm(null);
     // loadSlot routes to the life screen itself on success.
     if (!useGameStore.getState().loadSlot(slot)) {
-      useUiStore.getState().addToast({ icon: '⚠️', title: 'That save could not be read.' });
+      // A save from a newer build is healthy data — steer away from Delete.
+      const title =
+        slotLoadFailure(slot) === 'future'
+          ? 'This save needs a newer version of the game.'
+          : 'That save could not be read.';
+      useUiStore.getState().addToast({ icon: '⚠️', title });
     }
   };
 
