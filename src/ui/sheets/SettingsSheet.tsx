@@ -71,8 +71,17 @@ export function SettingsSheet(): ReactElement {
               fullWidth
               testId="settings-save-now"
               onClick={() => {
-                useGameStore.getState().saveNow();
-                useUiStore.getState().addToast({ icon: '💾', title: 'Saved.' });
+                // Only a write that outlives the tab may be reported as a save.
+                const saved = useGameStore.getState().saveNow();
+                useUiStore.getState().addToast(
+                  saved
+                    ? { icon: '💾', title: 'Saved.' }
+                    : {
+                        icon: '⚠️',
+                        title: "Couldn't save.",
+                        subtitle: 'Storage is unavailable on this device.',
+                      }
+                );
               }}
             >
               Save now

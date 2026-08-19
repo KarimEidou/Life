@@ -9,6 +9,7 @@ import type {
   GameState,
   Gender,
   NamePool,
+  OwnedAsset,
   Person,
 } from '@/types';
 
@@ -74,15 +75,29 @@ function hasBloodFamily(state: GameState): boolean {
   );
 }
 
-/** The name a sentence should call somebody, never an empty string. */
+/**
+ * The name a sentence should call somebody, never an empty string.
+ *
+ * `name` is typed `string`, but it comes out of `state.people`, which the save
+ * gate only proves is an object — a drifted row can carry no name at all. This
+ * runs inside `resolveText`, so a throw here unwinds out of `eventsPhase` with
+ * the year already half applied.
+ */
 function firstNameOf(person: Person, fallback: string): string {
-  const parts = person.name.trim().split(/\s+/);
+  const raw: unknown = person.name;
+  if (typeof raw !== 'string') return fallback;
+  const parts = raw.trim().split(/\s+/);
   return parts[0] || fallback;
 }
 
 /** Not behind bars. Asked by nearly everything: the prison pack owns those years. */
 function free(ctx: Ctx): boolean {
   return ctx.c.prison === null;
+}
+
+/** True while the character is already carrying this condition, treated or not. */
+function holds(ctx: Ctx, defId: string): boolean {
+  return ctx.c.illnesses.some((illness) => illness.defId === defId);
 }
 
 /** Holding a job and out in the world to do it. */
@@ -100,9 +115,16 @@ function employed(ctx: Ctx): boolean {
 function ownsType(ctx: Ctx, type: 'property' | 'vehicle'): boolean {
   const byId: Record<string, AssetDef | undefined> = ctx.reg.assetsById;
   const prefix = type === 'vehicle' ? 'veh-' : 'prop-';
-  return ctx.c.assets.some((owned) => {
-    const def = byId[owned.defId];
-    return def ? def.type === type : owned.defId.startsWith(prefix);
+  /* Widened like the people table: the save gate proves `assets` is an array and
+     stops there, so a drifted row can be a hole or carry no `defId`. This one
+     runs inside `isEligible`, which means a throw kills the whole year's pool —
+     including the events that would never have been drawn. */
+  const owned: readonly (OwnedAsset | undefined)[] = ctx.c.assets;
+  return owned.some((asset) => {
+    const defId: unknown = asset?.defId;
+    if (typeof defId !== 'string') return false;
+    const def = byId[defId];
+    return def ? def.type === type : defId.startsWith(prefix);
   });
 }
 
@@ -1266,7 +1288,10 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 64,
     weight: 4,
-    condition: free,
+    /* The illness effect is idempotent but the health and mood it costs are not,
+       so a second telling while the first bout is still running would charge for
+       a diagnosis the character already has. */
+    condition: (ctx) => free(ctx) && !holds(ctx, 'ill-food-poisoning'),
     text: 'The gas station sushi seemed fine at the time.',
     effects: [
       { kind: 'illness', add: 'ill-food-poisoning' },
@@ -1298,7 +1323,10 @@ const events: EventDef[] = [
     weight: 3,
     // A bad back is developed once, not caught every few years.
     oncePerLife: true,
-    condition: employed,
+    /* And not developed at all once `healthPhase` has already handed it over:
+       the illness effect would add nothing, but the health and mood it costs
+       would still land and the once-per-life slot would be spent on a no-op. */
+    condition: (ctx) => employed(ctx) && !holds(ctx, 'ill-back-pain'),
     text: 'Your chair, your posture and your job have been arguing about your spine.',
     effects: [
       { kind: 'illness', add: 'ill-back-pain' },

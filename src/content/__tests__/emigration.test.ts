@@ -22,7 +22,7 @@ import type { ContentRegistry, Ctx, EventDef, GameState, Rng } from '@/types';
 const WORLD = buildRegistry([countriesPack]);
 const emigEvents: EventDef[] = emigrationPack.events ?? [];
 
-/** The cards gated on nothing but `abroad`; the rest add family or residence. */
+/** The cards a fresh move opens on its own; the rest ask for family or years. */
 const PLAIN_CARDS = [
   'ev-emig-homesickness',
   'ev-emig-paperwork',
@@ -57,10 +57,21 @@ function alwaysDraws(): Rng {
   };
 }
 
+/**
+ * Reaches a birthday the way `agingPhase` does, opening the year log the move
+ * gets written into. The residence clock is read off that log, so a test that
+ * only bumped `c.age` would date every move to the year of birth.
+ */
+function birthday(state: GameState, age: number): void {
+  state.year += age - state.character.age;
+  state.character.age = age;
+  state.log.push({ age, year: state.year, entries: [] });
+}
+
 /** An American adult who can afford the $2,000 visa fee. */
 function adultLife(seed: number, lastName = 'Moreno'): GameState {
   const state = createLife(WORLD, { seed, firstName: 'Ada', lastName, countryId: 'us' });
-  state.character.age = 30;
+  birthday(state, 30);
   state.character.money = 60000;
   return state;
 }
@@ -110,6 +121,18 @@ function heirLife(seed: number): GameState {
   return state;
 }
 
+/**
+ * Draws the shipped ceremony, the pack's only writer of `emigration:done`. The
+ * flag is set through the real effect so the test still means something the day
+ * the ceremony stops setting it.
+ */
+function naturalise(state: GameState): void {
+  eventsPhase(ctxOf(state, registryOf([defOf('ev-emig-citizenship')]), alwaysDraws()));
+  if (state.character.flags['emigration:done'] !== true) {
+    throw new Error('naturalise: the ceremony did not fire');
+  }
+}
+
 describe('emigration gate', () => {
   it('leaves a refused application out of the storyline', () => {
     const state = adultLife(1);
@@ -153,7 +176,7 @@ describe('emigration gate', () => {
     const state = heirLife(3);
     applyForVisa(state, 'jp', false);
     // Well past the five years the ceremony asks for.
-    state.character.age = 45;
+    birthday(state, 45);
 
     expect(defOf('ev-emig-citizenship').condition?.(ctxOf(state))).toBe(false);
     expect(state.character.flags['emigration:done']).toBeUndefined();
@@ -188,7 +211,7 @@ describe('emigration gate', () => {
     const state = adultLife(1, 'France');
     applyForVisa(state, 'fr', true);
     // Five years settled: the beat that sets the flag the achievement reads.
-    state.character.age = 36;
+    birthday(state, 36);
 
     expect(defOf('ev-emig-citizenship').condition?.(ctxOf(state))).toBe(true);
   });
@@ -197,7 +220,7 @@ describe('emigration gate', () => {
     const state = adultLife(1);
     applyForVisa(state, 'jp', true);
     // Past the five-year visa cooldown, so the second application is legal.
-    state.character.age = 35;
+    birthday(state, 35);
     applyForVisa(state, 'us', true);
 
     expect(state.character.flags.countryLabel).toBe('United States');
@@ -214,6 +237,75 @@ describe('emigration gate', () => {
     state.character.prison = null;
     state.character.flags['emigration:done'] = true;
     expect(defOf('ev-emig-homesickness').condition?.(ctxOf(state))).toBe(true);
+  });
+
+  it('closes the renewal queue the year the passport lands', () => {
+    const state = adultLife(1);
+    applyForVisa(state, 'jp', true);
+    // Five years settled, so the ceremony is due.
+    birthday(state, 36);
+    naturalise(state);
+    const ctx = ctxOf(state);
+
+    // Nothing left to renew, and the flag holds `abroad` open for the rest of
+    // the life, so the card has to read the passport itself.
+    expect(defOf('ev-emig-paperwork').condition?.(ctx)).toBe(false);
+
+    // Living abroad carries on; only the queue at the counter ends.
+    for (const id of PLAIN_CARDS) {
+      if (id === 'ev-emig-paperwork') continue;
+      expect(defOf(id).condition?.(ctx), `event "${id}" closed at a citizen`).toBe(true);
+    }
+  });
+});
+
+describe('residence clock', () => {
+  it('counts the settling-in years from the move, and closes them on time', () => {
+    const state = adultLife(1);
+    applyForVisa(state, 'jp', true);
+    const shock = defOf('ev-emig-culture-shock');
+
+    // Everything is still new in the year of the move and for three after it.
+    expect(shock.condition?.(ctxOf(state))).toBe(true);
+    birthday(state, 33);
+    expect(shock.condition?.(ctxOf(state))).toBe(true);
+    birthday(state, 34);
+    expect(shock.condition?.(ctxOf(state))).toBe(false);
+  });
+
+  it('does not restart the clock when a later application is refused', () => {
+    const state = adultLife(1);
+    applyForVisa(state, 'jp', true);
+    // The cooldown is served, so a second application is legal — and refused.
+    birthday(state, 35);
+    applyForVisa(state, 'de', false);
+    const ctx = ctxOf(state);
+
+    // The stamp moved; the character did not.
+    expect(state.character.flags.lastVisaAge).toBe(35);
+    expect(state.character.countryId).toBe('jp');
+
+    // Five years in Japan: the newly-arrived card stays shut...
+    expect(defOf('ev-emig-culture-shock').condition?.(ctx)).toBe(false);
+    // ...and the ceremony a rewound clock would have pushed to 40 is due now.
+    expect(defOf('ev-emig-citizenship').condition?.(ctx)).toBe(true);
+
+    // The wider window closes on the move too, not on the refusal.
+    birthday(state, 36);
+    expect(defOf('ev-emig-language-wall').condition?.(ctxOf(state))).toBe(false);
+  });
+
+  it('restarts the clock when the life actually moves on', () => {
+    const state = adultLife(1);
+    applyForVisa(state, 'jp', true);
+    birthday(state, 36);
+    applyForVisa(state, 'de', true);
+    const ctx = ctxOf(state);
+
+    expect(state.character.flags.countryLabel).toBe('Germany');
+    // Six years in Japan buy nothing in Germany: new country, new first week.
+    expect(defOf('ev-emig-culture-shock').condition?.(ctx)).toBe(true);
+    expect(defOf('ev-emig-citizenship').condition?.(ctx)).toBe(false);
   });
 });
 
@@ -240,5 +332,20 @@ describe('emigration pack through the events phase', () => {
     expect(entries[0]?.text).toBe(
       'A song you have not heard since childhood came on in a supermarket in Japan.'
     );
+  });
+
+  it('never bills a citizen for a visa renewal', () => {
+    const state = adultLife(1);
+    applyForVisa(state, 'jp', true);
+    birthday(state, 36);
+    naturalise(state);
+
+    const money = state.character.money;
+    const before = state.rngState;
+    const only = registryOf([defOf('ev-emig-paperwork')]);
+
+    expect(eventsPhase(ctxOf(state, only))).toEqual([]);
+    expect(state.character.money).toBe(money);
+    expect(state.rngState).toBe(before);
   });
 });

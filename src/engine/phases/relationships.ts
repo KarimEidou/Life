@@ -11,11 +11,22 @@ const MORTAL_KINDS: readonly RelKind[] = ['mother', 'father', 'sibling'];
 /** Age from which anybody, whatever their relationship, is rolled for death. */
 const ELDER_AGE = 60;
 
-/** Mortality curve: flat zero until 40, then exponential, capped short of certain. */
+/**
+ * Mortality curve: flat zero until 40, then exponential, capped short of certain.
+ * One calibration with the character's own curve in `deathCheck.ts` — base and
+ * exponent must stay in step with `BASE_HAZARD`/`AGE_EXPONENT` there, or the
+ * people around the character outlive them: at a tenth of this base the curve
+ * kills almost nobody and a parent's median death age lands past 105.
+ */
 const MORTALITY_AGE = 40;
-const MORTALITY_BASE = 0.0002;
-const MORTALITY_GROWTH = 0.085;
+const MORTALITY_BASE = 0.002;
+const MORTALITY_GROWTH = 0.088;
 const MORTALITY_CAP = 0.9;
+
+/** Extreme age is its own hazard, as it is for the character. */
+const FRAIL_AGE = 105;
+const FRAIL_HAZARD = 0.5;
+const MAX_AGE = 110;
 
 /** Pets are rolled once they outlive this age, on a much steeper curve. */
 const PET_SAFE_AGE = 10;
@@ -66,7 +77,10 @@ function mortality(person: Person): number {
   const rolled = MORTAL_KINDS.includes(person.kind) || person.age >= ELDER_AGE;
   if (!rolled || person.age < MORTALITY_AGE) return 0;
   const raw = MORTALITY_BASE * Math.exp(MORTALITY_GROWTH * (person.age - MORTALITY_AGE));
-  return Math.min(MORTALITY_CAP, raw);
+  let q = Math.min(MORTALITY_CAP, raw);
+  if (person.age >= FRAIL_AGE) q = Math.max(q, FRAIL_HAZARD);
+  if (person.age >= MAX_AGE) q = 1;
+  return q;
 }
 
 /** Kills the person and charges the character the matching grief. */
@@ -89,7 +103,7 @@ function bury(ctx: Ctx, person: Person): LogEntry {
 /** Yearly affinity drift; a romance tracks the character's mood, everyone else fades. */
 function drift(ctx: Ctx, person: Person): void {
   if (!isRomance(person)) {
-    person.rel = Math.max(0, person.rel - DRIFT);
+    person.rel = clampStat(person.rel - DRIFT);
     return;
   }
   const raw = (ctx.state.character.stats.happiness - ROMANCE_BASELINE) / ROMANCE_MOOD_SPAN;

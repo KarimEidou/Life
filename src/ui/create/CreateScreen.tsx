@@ -69,12 +69,19 @@ export function CreateScreen(): ReactElement {
   const seed = useMemo(readSeed, []);
 
   const startLife = (): void => {
+    /* Trimmed here because `createLife` stores whatever it is handed verbatim:
+       a whitespace-only field would otherwise become a blank name in the header,
+       in every `{name}` token of the prose, and in the obituary. Blank after
+       trimming means "no choice", so the engine rolls a name as it does for an
+       untouched field. */
+    const trimmedFirst = first.trim();
+    const trimmedLast = last.trim();
     // newLife itself switches to the life screen.
     useGameStore.getState().newLife({
       slot: useGameStore.getState().slot ?? 1,
       seed,
-      firstName: first !== '' ? first : undefined,
-      lastName: last !== '' ? last : undefined,
+      firstName: trimmedFirst !== '' ? trimmedFirst : undefined,
+      lastName: trimmedLast !== '' ? trimmedLast : undefined,
       gender: gender === 'random' ? undefined : gender,
       countryId,
     });

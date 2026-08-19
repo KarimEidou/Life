@@ -123,6 +123,18 @@ const JOBS: JobDef[] = [
     fameGain: Number.NaN,
   },
   {
+    // Unreadable is not only NaN: a runaway rate poisons the salary exactly the
+    // way a NaN one does, so the guard has to be `Number.isFinite`.
+    id: 'overflow',
+    track: 'odd',
+    title: 'Balloon Handler',
+    icon: '🎈',
+    level: 1,
+    baseSalary: Number.POSITIVE_INFINITY,
+    raisePct: Number.POSITIVE_INFINITY,
+    req: {},
+  },
+  {
     id: 'dreamer',
     track: 'odd',
     title: 'Dreamer',
@@ -177,9 +189,18 @@ function texts(entries: LogEntry[]): string[] {
   return entries.map((e) => e.text);
 }
 
-/** The single `normal(0, 4)` performance draw a worked year opens with. */
+/**
+ * The single `normal(0, 4)` performance draw of a worked year.
+ *
+ * A year is only worked once the seat has survived it, so the layoff roll comes
+ * first and the noise is the draw after it. Anyone whose standing is under 25
+ * rolls the firing chance ahead of both; every caller here is well clear of it.
+ */
 function performanceNoise(cursor: number): number {
-  return createRng({ rngState: initialRngState(cursor) }).normal(0, 4);
+  const probe = { rngState: initialRngState(cursor) };
+  const rng = createRng(probe);
+  rng.next(); // stands in for the layoff roll
+  return rng.normal(0, 4);
 }
 
 interface Forced<T> {
@@ -403,6 +424,25 @@ describe('careerPhase at work', () => {
     /* `1 + NaN` is NaN and the salary is stored, so an unreadable raise used to
        cost the character the wage itself for the rest of the life — and the
        severance, the loan cap and the pension with it. It buys nothing now. */
+    expect(state.character.job?.salary).toBe(60000);
+  });
+
+  it('keeps the salary a raise too large to write down cannot grow either', () => {
+    const state = newLife(31);
+    state.character.age = 30;
+    state.character.job = jobState({
+      jobId: 'overflow',
+      title: 'Balloon Handler',
+      salary: 60000,
+      years: 0,
+      performance: 70,
+    });
+    state.rngState = initialRngState(19);
+
+    careerPhase(ctxFor(state));
+
+    // `60000 * Infinity` is Infinity, and every read downstream of the salary is
+    // as lost with it as with a NaN — refusing NaN alone would not be enough.
     expect(state.character.job?.salary).toBe(60000);
   });
 });
@@ -629,8 +669,9 @@ describe('firing and layoffs', () => {
     const c = state.character;
 
     expect(c.job).toBeNull();
-    // 12000 grew by the 2% annual raise before the tenth was cut.
-    expect(c.money).toBe(1224);
+    // A tenth of the salary they were on: the year the seat went is not worked,
+    // so the annual raise never landed to be cut from.
+    expect(c.money).toBe(1200);
     expect(c.flags.lastJobTitle).toBe('Barista');
   });
 
@@ -661,6 +702,70 @@ describe('firing and layoffs', () => {
        was already there. `Math.max(0, NaN)` is NaN, and the finance phase
        settles a NaN balance to $0 the same year. */
     expect(c.money).toBe(250000);
+  });
+
+  /* The finance phase settles the year on `c.job`, so a seat emptied here is
+     never paid for — the reason retirement is settled before the year is worked.
+     A layoff rolled at the end of the year used to leave the other half of that
+     hazard standing: the service was counted, the raise paid and the hard year
+     charged, and then the whole wage vanished. */
+  it('takes the seat before the year is worked, so a lost year is charged nothing', () => {
+    const { state, cursor } = forceBranch(
+      () => {
+        const s = newLife(32);
+        const c = s.character;
+        c.age = 40;
+        c.money = 0;
+        c.stats.health = 80;
+        c.stats.happiness = 60;
+        c.job = jobState({
+          jobId: 'barista',
+          title: 'Barista',
+          salary: 12000,
+          years: 4,
+          performance: 70,
+          workHard: true,
+        });
+        return s;
+      },
+      (s) => careerPhase(ctxFor(s)),
+      (s, entries) => texts(entries).includes('You were laid off.')
+    );
+    const c = state.character;
+
+    expect(c.job).toBeNull();
+    // Nothing was worked, so the effort switch costs nothing.
+    expect(c.stats.health).toBe(80);
+    expect(c.stats.happiness).toBe(60);
+    // A tenth of the salary they were on, the raise having never been paid.
+    expect(c.money).toBe(1200);
+
+    // And the drift was never rolled: the year is one layoff draw long.
+    const probe = { rngState: initialRngState(cursor) };
+    createRng(probe).next();
+    expect(state.rngState).toBe(probe.rngState);
+  });
+
+  it('charges a fired year the grief and nothing else', () => {
+    const { state } = forceBranch(
+      () => {
+        const s = newLife(33);
+        const c = s.character;
+        c.age = 40;
+        c.stats.health = 80;
+        c.stats.happiness = 60;
+        c.job = jobState({ years: 3, performance: 5, workHard: true });
+        return s;
+      },
+      (s) => careerPhase(ctxFor(s)),
+      (s, entries) => texts(entries).includes('You were fired.')
+    );
+    const c = state.character;
+
+    // The grief of losing the job, not the cost of a year that never happened.
+    expect(c.stats.health).toBe(80);
+    expect(c.stats.happiness).toBe(45);
+    expect(c.job).toBeNull();
   });
 });
 
@@ -1013,6 +1118,17 @@ describe('applyForJob', () => {
 
     /* The seat is the source of every wage the life pays, so an unreadable
        `baseSalary` has to stop at the door rather than be stored. */
+    expect(state.character.job?.salary).toBe(0);
+  });
+
+  it('hires at zero when the pack prices the job past every number', () => {
+    const { state } = forceBranch(
+      applicant,
+      (s) => applyForJob(s, REG, 'overflow'),
+      (s, result) => result.ok
+    );
+
+    // `Math.round(Infinity)` is Infinity, which the seat would carry for life.
     expect(state.character.job?.salary).toBe(0);
   });
 

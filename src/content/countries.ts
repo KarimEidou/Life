@@ -9,8 +9,11 @@ import type { ContentPack, CountryDef } from '@/types';
  * rich, popular destinations gate hardest.
  *
  * Ids are the shared two-letter vocabulary the rest of the content packs key
- * off; `us` is also the engine's fallback when a save names a country that no
- * longer exists.
+ * off. Nothing repairs a save that still names an id retired from this list:
+ * `findCountry` simply misses, so the finance phase charges neutral 1.0 cost
+ * and tax multipliers rather than any country's, while `{country}` keeps
+ * rendering the label stamped into `flags.countryLabel` when the life began.
+ * Retiring an id is a one-way door for the saves that hold it.
  */
 const countries: CountryDef[] = [
   {

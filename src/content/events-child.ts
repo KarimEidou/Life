@@ -5,6 +5,10 @@
  * die, siblings are never guaranteed, and a life can reach ten with nobody in it
  * but the character. So every event that names somebody gates on that person
  * being alive, and every affinity nudge is a no-op when the person is gone.
+ *
+ * School is the other gate: `eventsPhase` draws every year whether or not the
+ * character has a desk — the ladder only enrols at six, and a dropout never sits
+ * down again — so everything premised on a school day asks `inSchool` first.
  */
 
 import { addPerson } from '@/engine/state';
@@ -26,9 +30,15 @@ const GENDERS: readonly Gender[] = ['male', 'female'];
 /** Countries where "school is closed for snow" is a thing that happens. */
 const SNOW_COUNTRIES: readonly string[] = ['us', 'uk', 'ca', 'de', 'fr', 'jp'];
 
-/** Keeps an affinity inside the 0..100 the engine stores. */
+/** Keeps an affinity inside the 0..100 the engine stores, healing the way
+ *  `clampStat` does: an unreadable `rel` out of a drifted save settles at 0
+ *  rather than being written back, because `relationshipsPhase.drift` carries a
+ *  NaN affinity forward untouched (`Math.max(0, NaN)`) for every kin this
+ *  touches, so a poisoned one would never recover. */
 function clampRel(n: number): number {
-  return Math.max(0, Math.min(100, Math.round(n)));
+  if (!Number.isFinite(n)) return 0;
+  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
+  return Math.round(bounded * 10) / 10;
 }
 
 /** Every living person of one relationship kind, in the order they joined the life. */
@@ -38,6 +48,13 @@ function livingKin(people: Record<string, Person>, kind: RelKind): Person[] {
 
 function hasSibling(ctx: Ctx): boolean {
   return livingKin(ctx.state.people, 'sibling').length > 0;
+}
+
+/** Every school-life event needs a desk to happen at; a cell is not one.
+ *  The desk is empty until the year the ladder enrols a six-year-old, and empty
+ *  for good after a dropout — `flags.droppedOut` stops it re-enrolling anyone. */
+function inSchool(ctx: Ctx): boolean {
+  return ctx.c.education.enrolledIn !== undefined && ctx.c.prison === null;
 }
 
 /** The sibling the texts name and the effects hit: always the first one listed. */
@@ -463,6 +480,7 @@ const events: EventDef[] = [
     minAge: 5,
     maxAge: 9,
     weight: 5,
+    oncePerLife: true,
     text: (ctx) =>
       `Your first tooth came out ${ctx.rng.pick([
         'in an apple',
@@ -689,9 +707,10 @@ const events: EventDef[] = [
     id: 'ev-child-caught-lying',
     area: 'school',
     icon: '🤥',
-    minAge: 5,
+    minAge: 6,
     maxAge: 12,
     weight: 4,
+    condition: inSchool,
     text: 'You said your homework was finished. The teacher emailed home to say otherwise.',
     choices: [
       {
@@ -729,10 +748,10 @@ const events: EventDef[] = [
     id: 'ev-child-snow-day',
     area: 'school',
     icon: '❄️',
-    minAge: 5,
+    minAge: 6,
     maxAge: 12,
     weight: 4,
-    condition: (ctx) => SNOW_COUNTRIES.includes(ctx.c.countryId),
+    condition: (ctx) => inSchool(ctx) && SNOW_COUNTRIES.includes(ctx.c.countryId),
     text: 'School was cancelled for snow. The entire day belongs to you.',
     choices: [
       {
@@ -828,6 +847,7 @@ const events: EventDef[] = [
     minAge: 6,
     maxAge: 12,
     weight: 5,
+    condition: inSchool,
     text: 'A kid took the swing you were waiting for and told you to cry about it.',
     choices: [
       {
@@ -891,6 +911,7 @@ const events: EventDef[] = [
     maxAge: 12,
     weight: 5,
     oncePerLife: true,
+    condition: inSchool,
     text: (ctx) =>
       `A teacher noticed you were unusually good at ${ctx.rng.pick([
         'mental arithmetic',
@@ -969,6 +990,7 @@ const events: EventDef[] = [
     minAge: 6,
     maxAge: 12,
     weight: 4,
+    condition: inSchool,
     text: (ctx) =>
       `School photo day. ${ctx.rng.pick([
         'Your hair had other plans.',
@@ -1104,6 +1126,7 @@ const events: EventDef[] = [
     minAge: 7,
     maxAge: 12,
     weight: 4,
+    condition: inSchool,
     text: 'The school talent show needs one more act and your name is already on the clipboard.',
     choices: [
       {

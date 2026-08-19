@@ -5,12 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run typecheck && vite build",
     "build:single": "vite build --config vite.singlefile.config.ts && node scripts/size-check.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json",
     "e2e": "playwright test",
     "screenshots": "playwright test e2e/screenshots.spec.ts",
     "icons": "node scripts/gen-icons.mjs"

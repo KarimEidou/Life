@@ -28,8 +28,11 @@ import type {
  * refund a point of it. Frequency is therefore budgeted against a whole life's
  * health rather than against a year — a flu every other year reads plausible and
  * bankrupts the character's health by fifty. Treatment is the counterweight the
- * player controls: `act-doctor` stops the drain, halves the hazard the death
- * check reads and doubles the odds of shaking a bout off.
+ * player controls: `act-doctor` stops the drain, cuts the hazard the death check
+ * reads to a quarter and doubles the odds of shaking a bout off. A quarter
+ * because `deathProbability` adds a held row to the year's hazard at
+ * `lethality * 2` untreated and `lethality * 0.5` treated — so every number
+ * below carries twice its face value for as long as it goes untreated.
  *
  * Every risk factor is read defensively. A condition function runs against any
  * `GameState` the engine happens to be holding — a fresh newborn, a save written
@@ -47,11 +50,25 @@ import type {
  * `IllnessDef.label` carries its own article ('the flu', 'a bad back'), because
  * the engine reads it both as `You came down with ${label}.` and as
  * `You died of ${label}.`
+ *
+ * The rows that need the world outside ask `free`: a church-hall clinic, a
+ * pharmacy queue, a private scan, a dentist's chair and thirty days of
+ * residential rehab. `eventsPhase` keeps drawing and the Health sheet stays
+ * reachable while the character is inside, so an ungated row is one the prison
+ * pack's years hand out from a cell. The bouts (`flu-season`, `insomnia`,
+ * `allergies`, `back-tweak`) and the care rows (`act-doctor`, `act-therapy`,
+ * `act-checkup`, `act-meditation`) deliberately do not ask: a cell is as good a
+ * place as any to catch flu, fail to sleep or be seen by the infirmary.
  */
 
 /* ------------------------------------------------------------------ */
 /* Readers                                                             */
 /* ------------------------------------------------------------------ */
+
+/** Not behind bars. The prison pack owns those years. */
+function free(ctx: Ctx): boolean {
+  return ctx.c.prison === null;
+}
 
 /** Severity 0..100 of one addiction; anything unreadable counts as none. */
 function addiction(c: Character, which: AddictionKey): number {
@@ -436,7 +453,7 @@ function rehab(id: string, which: AddictionKey, label: string, icon: string): In
     cost: 6000,
     minAge: 14,
     cooldownYears: 2,
-    condition: (ctx: Ctx) => addiction(ctx.c, which) > 0,
+    condition: (ctx: Ctx) => free(ctx) && addiction(ctx.c, which) > 0,
     resolve: (ctx: Ctx) => {
       const before = addiction(ctx.c, which);
       const beat = before <= REHAB_STRENGTH;
@@ -568,6 +585,11 @@ const interactions: InteractionDef[] = [
     area: 'health',
     label: 'Meditate',
     icon: '🧘',
+    /* Old enough to sit still on purpose, the age `activities.ts` gates its own
+       `act-meditate` at. `canUse` falls back to `minAge ?? 0`, so ungated this
+       row — free, and on no cooldown — was offered from birth: a dozen taps
+       took a newborn to 100 happiness before the first Age Up. */
+    minAge: 8,
     cooldownYears: 0,
     resolve: (ctx: Ctx) => ({
       text: ctx.rng.pick([
@@ -606,7 +628,7 @@ const events: EventDef[] = [
     minAge: 14,
     maxAge: 120,
     weight: 4,
-    condition: (ctx: Ctx) => trueFlag(ctx.c, 'gymRegular') && ctx.c.prison === null,
+    condition: (ctx: Ctx) => trueFlag(ctx.c, 'gymRegular') && free(ctx),
     text: 'Something in your shoulder popped on the last rep.',
     choices: [
       {
@@ -665,6 +687,7 @@ const events: EventDef[] = [
     minAge: 40,
     maxAge: 120,
     weight: 4,
+    condition: free,
     text: 'A scan found a shadow. Two weeks of not sleeping later, a second scan found nothing at all.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: -3 },
@@ -679,6 +702,7 @@ const events: EventDef[] = [
     minAge: 0,
     maxAge: 120,
     weight: 4,
+    condition: free,
     text: (ctx: Ctx) =>
       untreated(ctx.c).length > 0
         ? 'A free clinic set up in the church hall. You queued three hours and left with a prescription.'
@@ -724,6 +748,7 @@ const events: EventDef[] = [
     minAge: 8,
     maxAge: 120,
     weight: 4,
+    condition: free,
     text: 'A back tooth has started sending signals.',
     choices: [
       {
@@ -768,6 +793,7 @@ const events: EventDef[] = [
     minAge: 5,
     maxAge: 120,
     weight: 4,
+    condition: free,
     text: 'The pharmacy is doing flu shots for thirty dollars, no appointment.',
     choices: [
       {

@@ -144,17 +144,52 @@ const LOAN_ID_FLAG = 'nextLoanId';
 const ASSET_ID_FLAG = 'nextAssetId';
 
 /**
- * Next value of one of those counters, bumped for the caller.
- * A life created before the counters existed has neither flag, so an absent (or
- * damaged) value restarts at 1: every id such a save already holds was minted in
- * the old `l<n>-<age>` shape, which this scheme never produces, so restarting
- * cannot hand out an id that is still live.
+ * One of those counters as a usable id number, or `undefined` when it cannot be
+ * trusted — the same guard `state.counterValue` puts in front of `Person.id`.
+ *
+ * These are ordinary entries in `Character.flags`: content writes flags through
+ * `{ kind: 'flag' }` with no reserved-name protection, and a save is just JSON,
+ * so this may hold a string, a boolean, zero, a fraction, NaN or Infinity.
+ * Non-finite and unsafe magnitudes are refused along with the rest, because they
+ * do not survive being incremented: `1e300 + 1` is `1e300`, so the counter
+ * freezes and every call after the first mints the id the first one did.
  */
-function nextId(c: Character, flag: string): number {
-  const raw = c.flags[flag];
-  const next = typeof raw === 'number' && raw >= 1 ? Math.floor(raw) : 1;
+function counterValue(raw: boolean | number | string | undefined): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) {
+    return undefined;
+  }
+  const floored = Math.floor(raw);
+  return Number.isSafeInteger(floored) ? floored : undefined;
+}
+
+/**
+ * Next id under `prefix`, with the counter bumped for the caller.
+ *
+ * A life created before the counters existed has neither flag, so an absent
+ * value restarts at 1: every id such a save already holds was minted in the old
+ * `l<n>-<age>` shape, which this scheme never produces, so restarting cannot
+ * hand out an id that is still live. A *damaged* value takes that same branch
+ * and that argument does not carry — a counter a pack effect or a hand-edited
+ * save overwrote can sit beside a live `l1` — so the candidate is walked past
+ * everything `held` already holds before it is used, exactly as `addPerson`
+ * walks past `state.people`. The probe is bounded by the collection: each step
+ * it takes consumes a distinct record of it, so `held.length` steps always
+ * reach a free id.
+ */
+function mintId(
+  c: Character,
+  flag: string,
+  prefix: string,
+  held: readonly { readonly id: string }[]
+): string {
+  let next = counterValue(c.flags[flag]) ?? 1;
+  let steps = held.length;
+  while (steps > 0 && held.some((row) => row.id === `${prefix}${next}`)) {
+    next += 1;
+    steps -= 1;
+  }
   c.flags[flag] = next + 1;
-  return next;
+  return `${prefix}${next}`;
 }
 
 /**
@@ -165,12 +200,12 @@ function nextId(c: Character, flag: string): number {
  * once. Exported because tuition is financed from the education phase.
  */
 export function mintLoanId(c: Character): string {
-  return `l${nextId(c, LOAN_ID_FLAG)}`;
+  return mintId(c, LOAN_ID_FLAG, 'l', c.loans);
 }
 
 /** The only supported way to mint an `OwnedAsset.id`; see `mintLoanId`. */
 function mintAssetId(c: Character): string {
-  return `a${nextId(c, ASSET_ID_FLAG)}`;
+  return mintId(c, ASSET_ID_FLAG, 'a', c.assets);
 }
 
 /** Tax owed on `gross`, scaled by the country's multiplier. */
@@ -683,6 +718,17 @@ export function buyAsset(
   const defaultMinAge = property ? PROPERTY_MIN_AGE : VEHICLE_MIN_AGE;
   const minAge = contentNumber(def.minAge ?? defaultMinAge, defaultMinAge);
   if (c.age < minAge) return { ok: false, reason: `You must be ${minAge} to buy that.` };
+
+  /* Financing is borrowing, and the bank `takeLoan` refuses a minor is the one
+     writing this note: a vehicle's gate opens at 16, so a deposit booked a
+     16-year-old a 9% loan that `settleLoans` charges interest on the next year,
+     `forceSales` repossesses against, and `takeLoan` counts against the
+     headroom the bank offers them at 18 — the only loan under 18 besides
+     tuition, which the engine issues rather than the player choosing. Buying
+     the same asset outright answers to the asset's gate alone. */
+  if (withLoan && c.age < BORROW_MIN_AGE) {
+    return { ok: false, reason: `You must be ${BORROW_MIN_AGE} to finance that.` };
+  }
 
   const down = withLoan ? Math.round(price * (property ? MORTGAGE_DOWN : AUTO_DOWN)) : price;
   if (c.money < down) {

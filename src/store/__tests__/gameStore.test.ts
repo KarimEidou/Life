@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getRegistry } from '@/content';
 import type { BlackjackTable } from '@/content/gambling';
 import { killCharacter } from '@/engine/death';
-import { memoryStorage, saveGame } from '@/engine/save';
+import {
+  loadUnlockedAchievements,
+  memoryStorage,
+  saveGame,
+  saveUnlockedAchievements,
+} from '@/engine/save';
+import type { StorageAdapter } from '@/engine/save';
 import { resetGameStoreForTests, useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
-import type { GameState, PendingEvent, Person } from '@/types';
+import type { AchievementDef, GameState, PendingEvent, Person } from '@/types';
 
 /** The loaded life, or a loud failure when a step expected one and it is gone. */
 function game(): GameState {
@@ -332,6 +338,72 @@ describe('abandonLife', () => {
   });
 });
 
+/* The Settings sheet toasts this call's result, so a write that never reached
+   durable storage must not come back as a save. */
+describe('saveNow', () => {
+  /** A memory adapter that can be made to refuse writes, as a full origin does. */
+  function blockableStorage(): { adapter: StorageAdapter; block: () => void } {
+    const inner = memoryStorage();
+    let blocked = false;
+    return {
+      adapter: {
+        getItem: (k: string): string | null => inner.getItem(k),
+        setItem: (k: string, v: string): void => {
+          if (blocked) {
+            throw new Error('QuotaExceededError');
+          }
+          inner.setItem(k, v);
+        },
+        removeItem: (k: string): void => {
+          inner.removeItem(k);
+        },
+      },
+      block: (): void => {
+        blocked = true;
+      },
+    };
+  }
+
+  it('reports failure when there is no life to write', () => {
+    expect(useGameStore.getState().saveNow()).toBe(false);
+  });
+
+  it('reports the write it made', () => {
+    resetGameStoreForTests(memoryStorage());
+    useGameStore.getState().newLife({ slot: 1, seed: 7 });
+    stepYears(2);
+    expect(useGameStore.getState().saveNow()).toBe(true);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(game().character.age);
+  });
+
+  it('reports failure when the write is refused, leaving the slot behind', () => {
+    const storage = blockableStorage();
+    resetGameStoreForTests(storage.adapter);
+    useGameStore.getState().newLife({ slot: 1, seed: 7 });
+    const stored = useGameStore.getState().slotSummaries()[0]?.age;
+
+    // A full origin, or one with site data blocked: every write throws.
+    storage.block();
+    stepYears(3);
+    expect(game().character.age).toBeGreaterThan(stored ?? 0);
+    expect(useGameStore.getState().saveNow()).toBe(false);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(stored);
+  });
+
+  it('reports failure when the app fell back to in-memory storage', async () => {
+    /* No localStorage under the test runner — the same state a browser leaves
+       the app in when site data is blocked. A fresh import therefore picks the
+       in-memory fallback, whose writes die with the tab. */
+    vi.resetModules();
+    const fresh = await import('@/store/gameStore');
+    fresh.useGameStore.getState().newLife({ slot: 1, seed: 7 });
+
+    expect(fresh.useGameStore.getState().saveNow()).toBe(false);
+    // The write still happened, so play continues against it this session.
+    expect(fresh.useGameStore.getState().slotSummaries()[0]?.empty).toBe(false);
+  });
+});
+
 describe('slotSummaries', () => {
   it('returns six rows without touching store state', () => {
     useGameStore.getState().newLife({ slot: 4, seed: 7 });
@@ -532,5 +604,98 @@ describe('review regressions', () => {
     useGameStore.getState().startBlackjack(50);
     expect(useGameStore.getState().casino).toBe(open);
     expect(game().character.money).toBe(bank);
+  });
+});
+
+/* The game installs as a PWA, so a second window over the same localStorage is
+   an ordinary state: neither the global achievement list nor a save slot may be
+   overwritten from the snapshot this window happened to load with. */
+describe('a second window on the same storage', () => {
+  /** Runs `write` with the clock pushed on, so it stamps a later `savedAt`. */
+  function asLaterWindow(write: () => void): void {
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+    try {
+      write();
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  /** Conflict toasts raised so far. */
+  function pausedToasts(): number {
+    return useUiStore.getState().toasts.filter((t) => t.title === 'Autosave paused').length;
+  }
+
+  it('keeps achievements the other window unlocked after this one read the list', () => {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    useGameStore.getState().newLife({ slot: 1, seed: 3 });
+    expect(useGameStore.getState().unlocked).toEqual([]);
+
+    // The other window finishes a long life; this store still holds its snapshot.
+    saveUnlockedAchievements(adapter, ['ach-centenarian']);
+
+    const toastsBefore = useUiStore.getState().toasts.length;
+    game().character.money = 2_000_000;
+    useGameStore.getState().setWorkHard(false);
+
+    const stored = loadUnlockedAchievements(adapter);
+    expect(stored).toContain('ach-millionaire');
+    // The wall is global and append-only: this write must not erase the other id.
+    expect(stored).toContain('ach-centenarian');
+    expect(useGameStore.getState().unlocked).toContain('ach-centenarian');
+
+    // Adopted, not earned here, so it must not toast.
+    const raised = useUiStore.getState().toasts.slice(toastsBefore);
+    expect(raised.length).toBeGreaterThan(0);
+    const centenarian: AchievementDef | undefined =
+      getRegistry().achievementsById['ach-centenarian'];
+    expect(raised.some((t) => t.subtitle === centenarian?.label)).toBe(false);
+  });
+
+  it('refuses to autosave over a slot the other window has written since', () => {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    useGameStore.getState().newLife({ slot: 1, seed: 42 });
+    stepYears(2);
+    const mine = game().character.age;
+
+    // The other window plays the same slot forty years on and saves it.
+    const theirs = JSON.parse(JSON.stringify(game())) as GameState;
+    theirs.character.age = mine + 40;
+    asLaterWindow(() => {
+      saveGame(adapter, 1, theirs);
+    });
+
+    useGameStore.getState().setWorkHard(false);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(mine + 40);
+    expect(pausedToasts()).toBe(1);
+
+    // Still refused on the next action, and said only the once.
+    useGameStore.getState().setWorkHard(true);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(mine + 40);
+    expect(pausedToasts()).toBe(1);
+
+    // The explicit Save is the deliberate override, and resumes autosaving.
+    useGameStore.getState().saveNow();
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(mine);
+    useGameStore.getState().setWorkHard(false);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(mine);
+    expect(pausedToasts()).toBe(1);
+  });
+
+  it('keeps autosaving a slot no other window has touched', () => {
+    const adapter = memoryStorage();
+    resetGameStoreForTests(adapter);
+    useGameStore.getState().newLife({ slot: 1, seed: 42 });
+    stepYears(2);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(game().character.age);
+
+    // A reload takes the slot back over, older stamp on disk and all.
+    resetGameStoreForTests(adapter);
+    expect(useGameStore.getState().loadSlot(1)).toBe(true);
+    stepYears(1);
+    expect(useGameStore.getState().slotSummaries()[0]?.age).toBe(game().character.age);
+    expect(pausedToasts()).toBe(0);
   });
 });

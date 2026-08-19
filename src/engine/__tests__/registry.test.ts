@@ -230,6 +230,8 @@ describe('buildRegistry', () => {
 
     expect(reg.namePools.us?.last).toEqual(['First']);
     expect(Object.keys(reg.namePools).sort()).toEqual(['jp', 'us']);
+    // The loser leaves no trace in the map, so the lint is the only thing that can name it.
+    expect(validateRegistry(reg)).toContain('duplicate name pool for country id "us"');
   });
 
   it('does not treat inherited object keys as declared ids', () => {
@@ -581,6 +583,44 @@ describe('validateRegistry', () => {
     expect(validateRegistry(countryless)).toEqual([]);
   });
 
+  it('reports a country claimed by two name pools, once, and one pool each alone', () => {
+    /* The only duplicate the registry cannot be asked about after the fact:
+       pools are keyed by country and the loser is dropped at build time, not
+       kept in a list, so a pack that widens an existing pool ships names no
+       life can ever draw while `namePools.us` still answers with a full pool
+       and every other check passes. */
+    const reg = buildRegistry([
+      pack('one', { countries: [country()], namePools: [pool({ last: ['First'] })] }),
+      pack('two', { namePools: [pool({ last: ['Second'] }), pool({ last: ['Third'] })] }),
+    ]);
+
+    expect(validateRegistry(reg)).toEqual(['duplicate name pool for country id "us"']);
+
+    // One pool per country is the shipped shape, however many countries there are.
+    const distinct = buildRegistry([
+      pack('c', {
+        countries: [country(), country({ id: 'jp', label: 'Japan' })],
+        namePools: [pool(), pool({ countryId: 'jp' })],
+      }),
+    ]);
+    expect(validateRegistry(distinct)).toEqual([]);
+  });
+
+  it('lints a registry it did not build instead of throwing on the missing pool list', () => {
+    /* Several suites hand-build a `ContentRegistry` literal, and the authored
+       pool list is kept beside the registry rather than on it, so those
+       fixtures have no pools to compare. The lint still has to run on them. */
+    const us = country();
+    const handBuilt: ContentRegistry = {
+      ...buildRegistry([]),
+      countries: [us],
+      countriesById: { us },
+      namePools: { us: pool() },
+    };
+
+    expect(validateRegistry(handBuilt)).toEqual([]);
+  });
+
   it('reports reversed sentences, free assets and negative cooldowns', () => {
     const reg = buildRegistry([
       pack('misc', {
@@ -594,6 +634,57 @@ describe('validateRegistry', () => {
     expect(problems).toContain('crime "heist" has a reversed sentenceYears range');
     expect(problems).toContain('asset "freebie" has price 0');
     expect(problems).toContain('interaction "nap" has cooldownYears -1');
+  });
+
+  it('reports a negative payout or sentence on a crime', () => {
+    /* Ordered and finite was the whole test, so a range that is simply below
+       zero validated clean: `commitCrime` rolls a negative payout, banks it and
+       reports the success as 'You got away with it. +-$1,240' while the balance
+       drops, and a negative sentence is served as no time at all — the term the
+       pack authored never happens and nothing says why. */
+    const reg = buildRegistry([
+      pack('misc', {
+        crimes: [
+          crime({ id: 'fine', payout: [-2000, -500] }),
+          crime({ id: 'backpay', sentenceYears: [-1, 3] }),
+        ],
+      }),
+    ]);
+
+    const problems = validateRegistry(reg);
+    expect(problems).toContain('crime "fine" has payout floor -2000');
+    expect(problems).toContain('crime "backpay" has sentenceYears floor -1');
+  });
+
+  it('names an unreadable crime range once, as a range', () => {
+    // The sign check runs on readable bounds only, so a NaN keeps one line.
+    const reg = buildRegistry([
+      pack('misc', {
+        crimes: [
+          crime({ id: 'ghost-take', payout: [Number.NaN, 500] }),
+          crime({ id: 'ghost-term', sentenceYears: [1, Number.POSITIVE_INFINITY] }),
+        ],
+      }),
+    ]);
+
+    expect(validateRegistry(reg)).toEqual([
+      'crime "ghost-take" has a non-finite payout range',
+      'crime "ghost-term" has a non-finite sentenceYears range',
+    ]);
+  });
+
+  it('leaves an ordinary crime range alone, including a zero floor', () => {
+    /* Widened, not tightened: the shipped shape is a crime that pays nothing
+       and one whose sentence may come to nothing. */
+    const reg = buildRegistry([
+      pack('misc', {
+        crimes: [
+          crime({ id: 'vandalism', payout: [0, 0], sentenceYears: [0, 1] }),
+          crime({ id: 'heist', payout: [2000, 15000], sentenceYears: [1, 4] }),
+        ],
+      }),
+    ]);
+    expect(validateRegistry(reg)).toEqual([]);
   });
 
   it('reports an unreadable cooldown on an interaction', () => {
@@ -628,6 +719,29 @@ describe('validateRegistry', () => {
       }),
     ]);
     expect(validateRegistry(reg)).toEqual([]);
+  });
+
+  it('reports an inverted age window on an interaction, and leaves usable ones alone', () => {
+    /* Transposing the pair is quieter than any other authoring slip on a row:
+       `availableInteractions` filters on `age >= minAge && age <= maxAge`, which
+       no age satisfies, so the sheet never renders the row for `canUse` to
+       refuse — the pack ships content no life can reach. A one-sided window and
+       a single-age one are both satisfiable, so neither is named. */
+    const reg = buildRegistry([
+      pack('misc', {
+        interactions: [
+          interaction({ id: 'backwards', minAge: 45, maxAge: 18 }),
+          interaction({ id: 'grown-up', minAge: 18, maxAge: 45 }),
+          interaction({ id: 'floor-only', minAge: 18 }),
+          interaction({ id: 'ceiling-only', maxAge: 18 }),
+          interaction({ id: 'one-year-only', minAge: 18, maxAge: 18 }),
+        ],
+      }),
+    ]);
+
+    expect(validateRegistry(reg)).toEqual([
+      'interaction "backwards" has minAge 45 above maxAge 18',
+    ]);
   });
 
   it('names a jail sentence of no readable length on an event and on an outcome', () => {

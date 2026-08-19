@@ -194,27 +194,32 @@ export function deleteSave(storage: StorageAdapter, slot: number): void {
   storage.removeItem(slotKey(slot));
 }
 
-/* Slot-list rows are read shallowly and never validated: a slot that cannot be
-   summarised is shown as empty rather than crashing the load menu. */
+/* Slot-list rows are read shallowly and never validated: a slot this build
+   cannot describe loses its details rather than crashing the load menu.
+   `empty`, though, has to keep meaning what `loadGame` means by it — nothing is
+   stored here. `loadGame` answers `corrupt` or `future` for every payload it
+   cannot read, never `empty`, and the load menu hands an `empty` row straight
+   to `startNew`, which overwrites the slot with no confirmation and no undo.
+   So anything actually written here stays occupied whether this build can make
+   sense of it or not — a newer envelope (which Continue reports as `future`), a
+   legacy one only a migration understands, a damaged payload the player may
+   still want to recover — and keeps its Continue/Delete alert. */
 function summarise(storage: StorageAdapter, slot: number): SlotSummary {
+  /* Declared outside the try so the catch can tell a read that never returned —
+     which says nothing about the slot — from a payload that is there and would
+     not parse. Only the second one keeps the slot occupied. */
+  let raw: string | null = null;
   try {
-    const raw = storage.getItem(slotKey(slot));
+    raw = storage.getItem(slotKey(slot));
     if (raw === null || raw === '') {
       return { slot, empty: true };
     }
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed)) {
-      return { slot, empty: true };
+      return { slot, empty: false };
     }
-    /* Version before shape, as in `loadGame`: a newer build is exactly where
-       `GameState` may have been reshaped, so a payload this build cannot read
-       still holds a real save. An `empty` row offers the slot to `startNew`,
-       which overwrites it with no confirmation, whereas an occupied row routes
-       through Continue and reports `future`. */
-    const unreadable: SlotSummary =
-      typeof parsed.version === 'number' && parsed.version > SAVE_VERSION
-        ? { slot, empty: false, savedAt: numberOr(parsed.savedAt, 0) }
-        : { slot, empty: true };
+    // Occupied, with nothing read out of it yet beyond the envelope stamp.
+    const unreadable: SlotSummary = { slot, empty: false, savedAt: numberOr(parsed.savedAt, 0) };
     const state = parsed.state;
     if (!isRecord(state)) {
       return unreadable;
@@ -240,7 +245,7 @@ function summarise(storage: StorageAdapter, slot: number): SlotSummary {
       dead: state.phase === 'dead',
     };
   } catch {
-    return { slot, empty: true };
+    return { slot, empty: raw === null || raw === '' };
   }
 }
 

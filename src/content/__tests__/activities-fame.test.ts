@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
+import { activitiesPack } from '@/content/activities';
 import { famePack } from '@/content/fame';
 import { resolveChoice } from '@/engine/ageUp';
-import { runInteraction } from '@/engine/interactions';
+import { applyEffects } from '@/engine/effects';
+import { availableInteractions, runInteraction } from '@/engine/interactions';
 import { eventsPhase } from '@/engine/phases/events';
 import { buildRegistry } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
-import { createLife } from '@/engine/state';
+import { addPerson, createLife } from '@/engine/state';
 import type {
   ContentRegistry,
   Ctx,
@@ -174,6 +176,17 @@ describe('act-endorse', () => {
     expect(moneyLines(state.log[state.log.length - 1]?.entries ?? [])).toEqual(['+$78,000']);
   });
 
+  it('names the cheque, not the balance it landed in', () => {
+    const state = newCelebrity(9, 3140);
+
+    const result = runInteraction(state, rowRegistry(), 'act-endorse');
+
+    /* A non-empty wallet is what tells the two apart: the row is paid on top of
+       3,140, so a figure read off the new balance would say $81,140. */
+    expect(state.character.money).toBe(3140 + feeAtFame(65));
+    expect(moneyLines(result?.entries ?? [])).toEqual(['+$78,000']);
+  });
+
   it('scales the figure it names with the fame that earned it', () => {
     const modest = newCelebrity(6, 0);
     modest.character.fame = 40; // the row's own floor
@@ -212,5 +225,167 @@ describe('act-endorse', () => {
     createRng(control).pick(['the endorsement']);
 
     expect(state.rngState).toBe(control.rngState);
+  });
+});
+
+/**
+ * Activities pack: the rows a sentence takes away.
+ *
+ * The pack's rule is that the prison pack owns those years, and it names the
+ * handful that survive one — a book, the yard, the prison library. Every other
+ * row has to ask `free`, because nothing else asks for it: `canUse` and
+ * `availableInteractions` consult `condition` and never `c.prison`, and the
+ * Activities tab stays on the bar for the whole sentence. A row that forgets is
+ * playable from a cell — free, uncooled and unlimited — beside a prison pack
+ * that puts its own mood rows on a yearly cooldown for exactly that reason.
+ */
+
+const activityRows: InteractionDef[] = activitiesPack.interactions ?? [];
+
+/** Every area the pack ships, so a new one cannot slip past this contract. */
+const ACTIVITY_AREAS = [...new Set(activityRows.map((row) => row.area))];
+
+/** The three the pack documents as surviving a sentence. */
+const PRISON_SAFE = ['act-gym', 'act-library', 'act-read-book'];
+
+/** Reads as a bug from a cell: a console, a games night, a retreat. */
+const OUTSIDE_ONLY = ['act-board-games', 'act-meditate', 'act-video-games'];
+
+function activitiesRegistry(): ContentRegistry {
+  return buildRegistry([{ id: 'activities-under-test', interactions: activityRows }]);
+}
+
+/** Mid-sentence, past every age gate the pack sets and able to afford every row. */
+function inmate(seed: number): GameState {
+  const state = createLife(EMPTY, { seed, firstName: 'Ada', lastName: 'Moreno' });
+  state.character.age = 30;
+  state.character.money = 50000;
+  state.character.prison = { crime: 'Robbery', yearsLeft: 6, totalYears: 6 };
+  return state;
+}
+
+/** What the Activities sheet would list, across all of its sections. */
+function offeredIds(state: GameState, reg: ContentRegistry): string[] {
+  return ACTIVITY_AREAS.flatMap((area) => availableInteractions(state, reg, area))
+    .map((def) => def.id)
+    .sort();
+}
+
+describe('activities during a sentence', () => {
+  it('offers from a cell exactly the rows it documents as surviving one', () => {
+    const state = inmate(11);
+
+    expect(offeredIds(state, activitiesRegistry())).toEqual([...PRISON_SAFE].sort());
+  });
+
+  it('hands the rest back the year the sentence ends', () => {
+    const state = inmate(11);
+    const jailed = offeredIds(state, activitiesRegistry());
+    state.character.prison = null;
+
+    const released = offeredIds(state, activitiesRegistry());
+
+    // Gated, not deleted: the same character out of the cell sees them again.
+    expect(released).toEqual(expect.arrayContaining([...PRISON_SAFE, ...OUTSIDE_ONLY]));
+    expect(released).toEqual(expect.arrayContaining(jailed));
+    expect(released.length).toBeGreaterThan(jailed.length);
+  });
+
+  it('refuses the row itself, not merely its place in the sheet', () => {
+    const state = inmate(12);
+    const before = state.character.stats.happiness;
+    const cursor = state.rngState;
+
+    // The sheet drops the row, but the store can still be asked for it by id.
+    const result = runInteraction(state, activitiesRegistry(), 'act-video-games');
+
+    expect(result?.text).toBe("You can't do that right now.");
+    expect(result?.entries).toEqual([]);
+    expect(state.character.stats.happiness).toBe(before);
+    /* A refusal costs nothing at all: no cooldown stamp, and no draw — the row's
+       own `chance(0.5)` is never reached, so the year's rolls are untouched. */
+    expect(state.interactionUse['act-video-games']).toBeUndefined();
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('still runs the rows it does offer from inside', () => {
+    const state = inmate(13);
+    const before = state.character.stats.smarts;
+
+    const result = runInteraction(state, activitiesRegistry(), 'act-read-book');
+
+    expect(result?.text).toContain('You finished');
+    expect(state.character.stats.smarts).toBeGreaterThan(before);
+  });
+});
+
+/**
+ * `act-vet-visit` prices the visit through `cost`, which `runInteraction` takes
+ * before `resolve` is ever reached — so the fee is already gone by the time the
+ * row picks a branch. Its petless branch is a guard the row's own `condition`
+ * keeps off the live path, which leaves nothing but this contract holding its
+ * sign: money handed back there is a refund that nets the visit to $0 while the
+ * line it ships says the vet charged anyway.
+ */
+
+/** The price the row declares, and therefore what the engine takes up front. */
+const VET_FEE = 200;
+
+function activityRow(id: string): InteractionDef {
+  const def = activityRows.find((candidate) => candidate.id === id);
+  if (!def) throw new Error(`activities ships no "${id}"`);
+  return def;
+}
+
+/** Out of prison, past the row's age gate, holding a household of `pets`. */
+function petOwner(seed: number, pets: number): GameState {
+  const state = createLife(EMPTY, { seed, firstName: 'Ada', lastName: 'Moreno' });
+  state.character.age = 30;
+  state.character.money = 1000;
+  for (let i = 0; i < pets; i += 1) {
+    addPerson(state, {
+      kind: 'pet',
+      name: 'Biscuit',
+      gender: 'female',
+      age: 3,
+      alive: true,
+      rel: 80,
+      petSpecies: 'dog',
+      flags: {},
+    });
+  }
+  return state;
+}
+
+describe('act-vet-visit', () => {
+  it('takes the fee once when there is a pet to take', () => {
+    const state = petOwner(21, 1);
+    const before = state.character.money;
+
+    const result = runInteraction(state, activitiesRegistry(), 'act-vet-visit');
+
+    expect(result?.text).toContain('was very brave');
+    expect(state.character.money).toBe(before - VET_FEE);
+  });
+
+  it('hands nothing back on the branch whose line says it was charged', () => {
+    /* `condition` keeps this branch off the live path, so the row is asked
+       directly: the guard still has to agree with its own copy the day the
+       condition loosens — greying the row out for a petless household instead
+       of dropping it is exactly what `availableInteractions` documents. */
+    const state = petOwner(22, 0);
+    const reg = activitiesRegistry();
+    const charged = state.character.money - VET_FEE; // where runInteraction leaves it
+    state.character.money = charged;
+    const cursor = state.rngState;
+
+    const branch = activityRow('act-vet-visit').resolve(ctxOf(state, reg));
+    applyEffects({ state, rng: createRng(state), reg }, branch.effects);
+
+    // Not vacuous: this is the petless branch, and it says it was charged.
+    expect(branch.text).toContain('charged you anyway');
+    expect(state.character.money).toBe(charged);
+    // The branch guards before picking, so a no-op costs no draw either.
+    expect(state.rngState).toBe(cursor);
   });
 });

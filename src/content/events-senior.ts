@@ -44,11 +44,6 @@ function spouseOf(state: GameState): Person | undefined {
   return alivePeople(state).find((p) => p.kind === 'spouse');
 }
 
-/** A living child, whatever age. */
-function anyChild(state: GameState): Person | undefined {
-  return alivePeople(state).find((p) => p.kind === 'child');
-}
-
 /** A living child old enough to plausibly have children of their own. */
 function grownChild(state: GameState): Person | undefined {
   return alivePeople(state).find((p) => p.kind === 'child' && p.age >= 25);
@@ -74,6 +69,23 @@ function holds(ctx: Ctx, defId: string): boolean {
 function drawingPension(ctx: Ctx): boolean {
   const pension = ctx.c.flags.pensionSalary;
   return typeof pension === 'number' && Number.isFinite(pension) && pension > 0;
+}
+
+/**
+ * There was a career behind this life.
+ *
+ * `jobsHeld` counts every hire and promotion, `lastJobTitle` is stamped by all
+ * four ways out of a job — retirement, a firing, a layoff, a resignation — and
+ * nothing in a life clears either, so between them they are the only record that
+ * a character who holds no job today ever held one. The obituary reads the same
+ * pair. Flags are free-form JSON, so neither is trusted to hold what it usually
+ * holds, and the counter a legacy heir starts at zero is no career.
+ */
+function everWorked(ctx: Ctx): boolean {
+  const held = ctx.c.flags.jobsHeld;
+  if (typeof held === 'number' && Number.isFinite(held) && held > 0) return true;
+  const title = ctx.c.flags.lastJobTitle;
+  return typeof title === 'string' && title !== '';
 }
 
 /** Enough of the world to find an owned asset in it; `Ctx` and `EffectCtx` both fit. */
@@ -155,10 +167,20 @@ const events: EventDef[] = [
     area: 'work',
     icon: '🏖️',
     minAge: 65,
-    maxAge: 72,
+    /* The window has to reach well past retirement, which the career phase puts
+       at 70: a worker holds their job until then, so a window closing at 72 left
+       a whole career three years to draw its own send-off while a life that
+       never worked had eight of them. */
+    maxAge: 80,
     weight: 5,
     oncePerLife: true,
-    condition: (ctx: Ctx) => free(ctx) && (drawingPension(ctx) || ctx.c.job === null),
+    /* Out of work and once in it, not merely out of work: `job === null` alone is
+       true of everyone who never worked at all. The pension cannot carry the
+       second half by itself either — the career phase only mints one for a seat
+       still held at retirement, so a career ended by a firing, a layoff or a
+       resignation leaves none behind. */
+    condition: (ctx: Ctx) =>
+      free(ctx) && ctx.c.job === null && (drawingPension(ctx) || everWorked(ctx)),
     text: 'Your old department threw you a retirement party. The sheet cake spelled your name wrong.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 9 },
@@ -407,7 +429,11 @@ const events: EventDef[] = [
     choices: [
       {
         label: 'Call a grandkid',
-        condition: (ctx: Ctx) => anyChild(ctx.state) !== undefined,
+        /* The pack's grandchild stand-in, same as `ev-senior-grandkid-visit`: a
+           child of 25 or more. Any living child would offer the call to the
+           parent of a toddler — `rel-adopt` has no upper age — and land the
+           affinity on whichever child the table lists first, grown or not. */
+        condition: (ctx: Ctx) => grownChild(ctx.state) !== undefined,
         outcomes: [
           {
             weight: 4,
@@ -415,7 +441,7 @@ const events: EventDef[] = [
             effects: [
               { kind: 'stat', stat: 'happiness', delta: 5 },
               { kind: 'stat', stat: 'smarts', delta: 1 },
-              relWith(anyChild, 3),
+              relWith(grownChild, 3),
             ],
           },
           {
@@ -639,7 +665,8 @@ const events: EventDef[] = [
     minAge: 65,
     maxAge: 120,
     weight: 4,
-    condition: free,
+    // There is no old team to meet if there was never a job. Still working is fine.
+    condition: (ctx: Ctx) => free(ctx) && everWorked(ctx),
     text: 'The old team met for lunch. Half of them are retired and half are pretending not to be.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 6 },

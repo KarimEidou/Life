@@ -99,16 +99,21 @@ interface GameStore {
 
   startLegacy(childId: string): void;
   abandonLife(): void;
-  saveNow(): void;
+  saveNow(): boolean;
 }
 
 /* Storage is best-effort: localStorage throws in Safari private mode and is
    absent entirely under the test runner; without it the game still plays, it
    just does not persist. */
+let storagePersists = true;
 let storage: StorageAdapter = (() => {
   try {
     return browserStorage();
   } catch {
+    /* The fallback Map dies with the tab, so a write into it is not a save the
+       player will find again: `saveNow` is the one write whose outcome is
+       reported, and it reports this one as a failure. */
+    storagePersists = false;
     return memoryStorage();
   }
 })();
@@ -136,7 +141,11 @@ function writeTableSidecar(slot: number | null, table: BlackjackTable | null): v
   try {
     if (table === null || table.done) {
       storage.removeItem(tableKey(slot));
-    } else {
+    } else if (!slotTakenOver) {
+      /* Not once another window owns the slot: the stake behind this hand is
+         charged in a state that is no longer being autosaved, so leaving the
+         hand to be restored on top of that window's save would pay it out of a
+         balance it was never taken from. */
       storage.setItem(tableKey(slot), JSON.stringify(table));
     }
   } catch {
@@ -193,6 +202,69 @@ function readTableSidecar(slot: number): BlackjackTable | null {
   } catch {
     return null;
   }
+}
+
+/* `saveGame` owns this key; the store spells it out too because the ownership
+   check below needs one slot's envelope stamp, and the only exported reader of
+   it is `listSlots`, which parses all six saves. */
+function saveKey(slot: number): string {
+  return `ol.save.${String(slot)}`;
+}
+
+/**
+ * When this window last held the slot's newest state, and whether the player
+ * has already been told that it lost it.
+ *
+ * `ol.save.<slot>` is last-writer-wins while the store keeps whatever it read
+ * when the slot was opened, and the game installs as a PWA — the same slot open
+ * in the installed window and in a browser tab is an ordinary state that no
+ * action guards against. A commit from the window that is behind would autosave
+ * its own age over the other's, silently rolling the slot back years. A stored
+ * stamp later than this window's last write can only be another writer's, so
+ * the autosave stands down rather than erase it.
+ */
+let slotOwnedAt: { slot: number; at: number } | null = null;
+let slotTakenOver = false;
+
+/** Records this window as the writer of the slot's newest state. */
+function claimSlot(slot: number): void {
+  /* A wall clock, as in `saveGame`'s own stamp: slot metadata, never an input
+     to a game rule. Taken after the write it describes, so this window's own
+     stamp can never read back as newer than its claim. */
+  slotOwnedAt = { slot, at: Date.now() };
+  slotTakenOver = false;
+}
+
+/** The stamp `ol.save.<slot>` carries now; 0 when it holds nothing readable. */
+function storedSavedAt(slot: number): number {
+  try {
+    const raw = storage.getItem(saveKey(slot));
+    if (raw === null) {
+      return 0;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object') {
+      return 0;
+    }
+    const at: unknown = (parsed as { savedAt?: unknown }).savedAt;
+    return isAmount(at) ? at : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * True when the slot holds a write this window did not make.
+ *
+ * An unclaimed slot reads as this window's: every path that opens or creates a
+ * life claims the slot, so no claim means there is nothing to compare against
+ * and the write goes through exactly as it did before.
+ */
+function slotWrittenElsewhere(slot: number): boolean {
+  if (slotOwnedAt === null || slotOwnedAt.slot !== slot) {
+    return false;
+  }
+  return storedSavedAt(slot) > slotOwnedAt.at;
 }
 
 /**
@@ -260,7 +332,11 @@ export const useGameStore = create<GameStore>()((set, get) => {
     const fresh = evaluateAchievements(game, reg, unlocked);
     let nextUnlocked = unlocked;
     if (fresh.length > 0) {
-      nextUnlocked = [...unlocked, ...fresh];
+      /* `ol.achievements` is the one global, append-only list, and this store
+         read it once at page load: writing the snapshot back would delete
+         whatever another window has unlocked since. Merged on write instead —
+         the toasts stay driven by `fresh`, so ids adopted here never toast. */
+      nextUnlocked = [...new Set([...readUnlocked(), ...unlocked, ...fresh])];
       try {
         saveUnlockedAchievements(storage, nextUnlocked);
       } catch {
@@ -278,10 +354,24 @@ export const useGameStore = create<GameStore>()((set, get) => {
     }
 
     if (slot !== null) {
-      try {
-        saveGame(storage, slot, game);
-      } catch {
-        // The autosave is lost but play continues.
+      if (slotWrittenElsewhere(slot)) {
+        /* Said once: the check keeps refusing for every later action too, and
+           the Settings sheet's explicit Save is the way to take the slot back. */
+        if (!slotTakenOver) {
+          slotTakenOver = true;
+          useUiStore.getState().addToast({
+            icon: '⚠️',
+            title: 'Autosave paused',
+            subtitle: 'This slot is open in another window.',
+          });
+        }
+      } else {
+        try {
+          saveGame(storage, slot, game);
+          claimSlot(slot);
+        } catch {
+          // The autosave is lost but play continues.
+        }
       }
     }
 
@@ -307,6 +397,8 @@ export const useGameStore = create<GameStore>()((set, get) => {
         countryId: opts.countryId,
       });
       writeTableSidecar(opts.slot, null);
+      // Creating a life in a slot is a deliberate overwrite of whatever is there.
+      claimSlot(opts.slot);
       set({ game, slot: opts.slot, casino: null });
       commit(game);
       useUiStore.getState().setScreen('life');
@@ -327,6 +419,8 @@ export const useGameStore = create<GameStore>()((set, get) => {
          `commit` spreads the game object before routing, so a mutation made
          down there would never reach the copy React renders. */
       repairStalledChoice(result.state);
+      // What was just read is the slot's newest state, so this window holds it.
+      claimSlot(slot);
       set({ game: result.state, slot, casino: readTableSidecar(slot) });
       const ui = useUiStore.getState();
       ui.closeAllSheets();
@@ -647,17 +741,27 @@ export const useGameStore = create<GameStore>()((set, get) => {
       ui.setScreen('slots');
     },
 
-    /** Forces a write of the loaded slot. */
-    saveNow: (): void => {
+    /**
+     * Forces a write of the loaded slot; true only when the life reached storage
+     * that outlives the tab. This is the only write the player is told about, so
+     * the caller must be able to tell a real save from a lost one.
+     */
+    saveNow: (): boolean => {
       const { game, slot } = get();
       if (game === null || slot === null) {
-        return;
+        return false;
       }
       try {
+        /* Deliberately not subject to the autosave's ownership check: asking to
+           save is asking to write this life to the slot, and it is the only way
+           back to autosaving once another window has taken the slot over. */
         saveGame(storage, slot, game);
+        claimSlot(slot);
       } catch {
         // The save is lost but play continues.
+        return false;
       }
+      return storagePersists;
     },
   };
 });
@@ -675,5 +779,11 @@ export function slotLoadFailure(slot: number): 'empty' | 'corrupt' | 'future' | 
 /** Swaps the storage adapter and clears any loaded life; tests only. */
 export function resetGameStoreForTests(adapter?: StorageAdapter): void {
   storage = adapter ?? memoryStorage();
+  /* An injected adapter is the caller's storage of record, so writes to it count
+     as persisted; only the module's own fallback above reads as ephemeral. */
+  storagePersists = true;
+  // A fresh page load: this window has written no slot yet.
+  slotOwnedAt = null;
+  slotTakenOver = false;
   useGameStore.setState({ game: null, slot: null, casino: null, unlocked: readUnlocked() });
 }

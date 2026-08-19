@@ -12,6 +12,30 @@ import { ageYears, closeSheet, resolveEventCards } from './helpers';
 
 const SEED = 777;
 
+/** Every capture a complete walk produces, in order. */
+const EXPECTED_SHOTS = [
+  '01-slots',
+  '02-create',
+  '03-life-young',
+  '04-event',
+  '05-sheet-occupation',
+  '06-sheet-assets',
+  '07-sheet-relationships',
+  '08-sheet-activities',
+  '09-sheet-more',
+  '10-sheet-achievements',
+  '11-sheet-settings',
+  '12-death',
+];
+
+/**
+ * What this run actually wrote. The set is only useful whole, and a gap is
+ * otherwise invisible on disk: `e2e/__screenshots__/` is gitignored but never
+ * cleaned, so a PNG left by an earlier run stands in for one this run skipped.
+ * The single test below clears this before it starts walking.
+ */
+const captured = new Set<string>();
+
 /** Where a named capture lands for the current project (cwd is the repo root). */
 function shotPath(testInfo: TestInfo, name: string): string {
   return `e2e/__screenshots__/${testInfo.project.name}/${name}.png`;
@@ -20,6 +44,7 @@ function shotPath(testInfo: TestInfo, name: string): string {
 /** Captures the viewport under a stable, ordered name. */
 async function shot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
   await page.screenshot({ path: shotPath(testInfo, name) });
+  captured.add(name);
 }
 
 /** Opens one tab's sheet, screenshots it and closes it again. */
@@ -37,6 +62,7 @@ async function shootTabSheet(
 
 test('walks the whole app capturing screenshots', async ({ page }, testInfo) => {
   test.setTimeout(300000);
+  captured.clear();
 
   // 01 — the save slots.
   await page.goto(`/?seed=${String(SEED)}`);
@@ -60,7 +86,8 @@ test('walks the whole app capturing screenshots', async ({ page }, testInfo) => 
   await expect(page.getByTestId('screen-life')).toBeVisible();
   await shot(page, testInfo, '03-life-young');
 
-  // 04 — an event card, if one comes up within 40 years; skipped gracefully.
+  // 04 — the first event card of the life, hunted for up to 40 years. A hunt
+  // that turns up nothing leaves the set short, which the check at the end names.
   const eventSheet = page.getByTestId('sheet-event');
   const death = page.getByTestId('screen-death');
   for (let i = 0; i < 40; i += 1) {
@@ -83,10 +110,14 @@ test('walks the whole app capturing screenshots', async ({ page }, testInfo) => 
     await resolveEventCards(page);
   }
 
-  // A freak early death ends the walk with just the obituary capture.
+  /* A freak early death ends the walk here: the tab bar and the More stack go
+     with `LifeScreen`, so 05-11 can never be captured. Seed 777 survives the
+     hunt today, but any content change that shifts its draws can flip that, so
+     capture the obituary and mark the run skipped: a third of a set reporting
+     as a pass is how a design review ends up shipping last week's PNGs. */
   if (await death.isVisible()) {
     await shot(page, testInfo, '12-death');
-    return;
+    test.skip(true, `seed ${String(SEED)} died before adulthood; capture set incomplete`);
   }
 
   // 05-08 — the four plain tab sheets.
@@ -120,4 +151,8 @@ test('walks the whole app capturing screenshots', async ({ page }, testInfo) => 
   await expect(death).toBeVisible();
   await expect(page.getByTestId('death-cause')).not.toBeEmpty();
   await shot(page, testInfo, '12-death');
+
+  // The walk is a deliverable, not a smoke test: it passes only with the set whole.
+  const missing = EXPECTED_SHOTS.filter((name) => !captured.has(name));
+  expect(missing, 'captures this walk never took').toEqual([]);
 });

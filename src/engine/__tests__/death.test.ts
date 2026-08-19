@@ -673,6 +673,33 @@ describe('deathProbability', () => {
     expect(unknown).toBeCloseTo(base, 10);
   });
 
+  /* `lethality` is a hand-authored content number and `validateRegistry` never
+     runs at load time, so one unreadable one used to be added straight into the
+     sum: `rng.chance(NaN)` is `false`, so the character could not die of
+     anything at all until the 110 backstop. Dropped, not summed — Infinity is
+     no more readable than NaN, so it does not mean "certain death" either. */
+  it('drops an illness whose lethality is unreadable', () => {
+    const reg = illnessRegistry(
+      illness('cancer', 'cancer', 0.25),
+      illness('broken', 'a typo', Number.NaN),
+      illness('endless', 'an overflow', Number.POSITIVE_INFINITY)
+    );
+    const base = hazard(reg, () => undefined);
+    const withBroken = hazard(reg, (s) => {
+      s.character.illnesses = [
+        { defId: 'broken', years: 1, treated: false },
+        { defId: 'cancer', years: 3, treated: false },
+      ];
+    });
+    const endless = hazard(reg, (s) => {
+      s.character.illnesses = [{ defId: 'endless', years: 1, treated: false }];
+    });
+
+    // The readable illness still counts for exactly what it is worth.
+    expect(withBroken).toBeCloseTo(base + 0.5, 6);
+    expect(endless).toBeCloseTo(base, 10);
+  });
+
   it('adds addictions, and drugs three times over', () => {
     const reg = emptyRegistry();
     const base = hazard(reg, () => undefined);
@@ -685,6 +712,23 @@ describe('deathProbability', () => {
 
     expect(drink).toBeCloseTo(base + 0.006, 6);
     expect(drugs).toBeCloseTo(base + 0.018, 6);
+  });
+
+  /* `loadGame` certifies the containers, not the numbers inside them, so a
+     drifted save can hand a key an unreadable severity. `NaN <= 0` is false, so
+     the old gate let it through and poisoned the sum. */
+  it('drops an addiction severity it cannot read', () => {
+    const reg = emptyRegistry();
+    const base = hazard(reg, () => undefined);
+    const broken = hazard(reg, (s) => {
+      s.character.addictions = { alcohol: Number.NaN, drugs: Number.POSITIVE_INFINITY };
+    });
+    const mixed = hazard(reg, (s) => {
+      s.character.addictions = { alcohol: Number.NaN, drugs: 60 };
+    });
+
+    expect(broken).toBeCloseTo(base, 10);
+    expect(mixed).toBeCloseTo(base + 0.018, 6);
   });
 
   it('never exceeds 0.95 before extreme age', () => {
@@ -710,6 +754,31 @@ describe('deathProbability', () => {
     expect(hazard(reg, healthy(109))).toBeGreaterThanOrEqual(0.5);
     expect(hazard(reg, healthy(110))).toBe(1);
     expect(hazard(reg, healthy(120))).toBe(1);
+  });
+
+  /* The last line of defence, for the inputs no guard above owns: a save's own
+     numbers are never checked (`loadGame` shape-checks containers only), and a
+     NaN age or health used to travel through the clamp and both backstops
+     untouched — `Math.max(NaN, 0.5)` is NaN. Whatever comes in, the year's
+     answer has to be a probability, or `rng.chance` refuses every roll. */
+  it('always answers with a probability, whatever it was handed', () => {
+    const reg = emptyRegistry();
+    const unreadable = (age: number, health: number) => (s: GameState): void => {
+      s.character.age = age;
+      s.character.stats.health = health;
+    };
+
+    for (const age of [20, 60, 105, 110]) {
+      const q = hazard(reg, unreadable(age, Number.NaN));
+      expect(Number.isFinite(q)).toBe(true);
+      expect(q).toBeGreaterThanOrEqual(0);
+      expect(q).toBeLessThanOrEqual(1);
+    }
+    // The extreme-age backstops still bind on top of an unreadable hazard.
+    expect(hazard(reg, unreadable(105, Number.NaN))).toBeGreaterThanOrEqual(0.5);
+    expect(hazard(reg, unreadable(110, Number.NaN))).toBe(1);
+    // An unreadable age has no curve to sit on, so it settles at the floor.
+    expect(hazard(reg, unreadable(Number.NaN, 50))).toBe(0);
   });
 });
 
@@ -753,6 +822,49 @@ describe('deathCheckPhase', () => {
     deathCheckPhase(ctx);
 
     expect(ctx.c.flags.pendingDeathCause).toBe('cancer');
+  });
+
+  /* `0.25 > NaN` is false, so an unreadable def adopted as `worst` on the first
+     pass could never be displaced and took the obituary. */
+  it('ignores an illness it cannot read when blaming one', () => {
+    const reg = illnessRegistry(
+      illness('broken', 'a typo', Number.NaN),
+      illness('cancer', 'cancer', 0.25)
+    );
+    const ctx = ctxFor(
+      reg,
+      (s) => {
+        s.character.illnesses = [
+          { defId: 'broken', years: 1, treated: false },
+          { defId: 'cancer', years: 3, treated: false },
+        ];
+      },
+      stubRng(true)
+    );
+
+    deathCheckPhase(ctx);
+
+    expect(ctx.c.flags.pendingDeathCause).toBe('cancer');
+  });
+
+  /* The symptom the guards exist for: `rng.chance(NaN)` misses at every cursor,
+     so one unreadable illness used to make the character immortal — this loop
+     produced zero deaths at any age below 110. */
+  it('can still kill a character carrying an unreadable illness', () => {
+    const reg = illnessRegistry(illness('broken', 'a typo', Number.NaN));
+    let deaths = 0;
+
+    for (let cursor = 0; cursor < 20; cursor += 1) {
+      const ctx = ctxFor(reg, (s) => {
+        s.character.age = 105;
+        s.character.illnesses = [{ defId: 'broken', years: 1, treated: false }];
+        s.rngState = cursor * 7919 + 13;
+      });
+      deathCheckPhase(ctx);
+      if (ctx.state.phase === 'dead') deaths += 1;
+    }
+
+    expect(deaths).toBeGreaterThan(0);
   });
 
   it('blames a heavy drug habit next', () => {

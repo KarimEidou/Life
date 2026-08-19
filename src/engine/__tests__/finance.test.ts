@@ -1859,6 +1859,43 @@ describe('buyAsset', () => {
     expect(buyAsset(teen, REG, 'estate').ok).toBe(true);
   });
 
+  it('refuses to finance for anyone under 18, whatever the asset itself allows', () => {
+    const teen = newLife(77);
+    const c = teen.character;
+    c.age = 16;
+    c.money = 5000;
+    const before = teen.log[teen.log.length - 1].entries.length;
+
+    /* The same bank that will not lend a 16-year-old a dollar through
+       `takeLoan` was writing them a 9% note through the showroom: the vehicle
+       gate opens at 16, and nothing after it looked at the borrower's age. */
+    expect(buyAsset(teen, REG, 'scooter', true)).toEqual({
+      ok: false,
+      reason: 'You must be 18 to finance that.',
+    });
+
+    // A refusal touches nothing: no asset, no debt, no cash, no line in the feed.
+    expect(c.assets).toEqual([]);
+    expect(c.loans).toEqual([]);
+    expect(c.money).toBe(5000);
+    expect(c.flags.lastPurchaseJoyAge).toBeUndefined();
+    expect(teen.log[teen.log.length - 1].entries).toHaveLength(before);
+
+    // Paying for it outright at 16 is still the asset's gate alone.
+    expect(buyAsset(teen, REG, 'scooter')).toEqual({ ok: true });
+    expect(c.assets).toHaveLength(1);
+    expect(c.loans).toEqual([]);
+    expect(c.money).toBe(3000);
+
+    // And the showroom finances the year the borrower can borrow.
+    c.age = 18;
+    c.money = 10000;
+    expect(buyAsset(teen, REG, 'sedan', true)).toEqual({ ok: true });
+    expect(c.loans).toEqual([
+      { id: 'l1', kind: 'auto', principal: 14000, apr: 0.09, assetId: 'a2' },
+    ]);
+  });
+
   it('refuses an asset the registry does not list', () => {
     const state = newLife(45);
     state.character.age = 30;
@@ -2069,6 +2106,48 @@ describe('generated ids', () => {
     expect(loanIds).toHaveLength(16);
     expect(assetIds).toHaveLength(8);
     expect(new Set([...loanIds, ...assetIds]).size).toBe(24);
+  });
+
+  it('mints unique loan ids from a counter too large to advance', () => {
+    const state = newLife(54);
+    const c = state.character;
+    c.age = 30;
+    c.job = job(200000);
+    c.money = 500000;
+    /* The counters are ordinary flags: a pack effect or a hand-edited save can
+       leave any number here, and `1e300 + 1` is `1e300` — a counter that never
+       moves minted `l1e+300` for every loan the life took. */
+    c.flags.nextLoanId = 1e300;
+
+    expect(takeLoan(state, REG, 1000).ok).toBe(true);
+    expect(takeLoan(state, REG, 1000).ok).toBe(true);
+    const [first, second] = c.loans.map((loan) => loan.id);
+    expect(first).not.toBe(second);
+    expect(Number.isSafeInteger(c.flags.nextLoanId)).toBe(true);
+
+    // Settling one debt must leave the other standing, principal intact.
+    repayLoan(state, first, 1000);
+    expect(c.loans).toEqual([{ id: second, kind: 'personal', principal: 1000, apr: 0.09 }]);
+  });
+
+  it('walks a restarted asset counter past the ids the character still holds', () => {
+    const state = newLife(55);
+    const c = state.character;
+    c.age = 30;
+    c.money = 2000000;
+
+    expect(buyAsset(state, REG, 'sedan').ok).toBe(true);
+    const sedanId = c.assets[0].id;
+    // Unusable, so the counter restarts — but `a1` is live, unlike the ids a
+    // pre-counter save holds.
+    c.flags.nextAssetId = 0;
+
+    expect(buyAsset(state, REG, 'condo').ok).toBe(true);
+    expect(c.assets[1].id).not.toBe(sedanId);
+
+    // Selling one asset must not take the other with it.
+    sellAsset(state, sedanId);
+    expect(c.assets.map((asset) => asset.label)).toEqual(['condo']);
   });
 });
 

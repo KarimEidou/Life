@@ -70,15 +70,38 @@ function collect<T extends { id: string }>(
 }
 
 /** Name pools are keyed by the country they belong to; the first pool wins. */
-function collectNamePools(packs: readonly ContentPack[]): Record<string, NamePool> {
+function collectNamePools(packs: readonly ContentPack[]): {
+  byCountry: Record<string, NamePool>;
+  list: NamePool[];
+} {
   const byCountry: Record<string, NamePool> = idMap<NamePool>();
+  const list: NamePool[] = [];
   for (const pack of packs) {
     for (const pool of pack.namePools ?? []) {
+      // Kept even when it loses the key, for the reason `collect` keeps a duplicate id.
+      list.push(pool);
       if (!owns(byCountry, pool.countryId)) byCountry[pool.countryId] = pool;
     }
   }
-  return byCountry;
+  return { byCountry, list };
 }
+
+/**
+ * Every pool a pack authored, per registry, in registration order.
+ *
+ * Pools are the one collection whose index cannot show its own duplicates:
+ * `namePools` is keyed by country, so a second pool for a country leaves no
+ * trace in the registry at all — `namePools[country.id]` still answers with a
+ * full pool, both country checks in `validateRegistry` still pass, and not one
+ * name the losing pack authored can reach a character, a parent, a partner or a
+ * child in any life. This list is what lets the lint name it.
+ *
+ * It lives beside the registry rather than on it because `ContentRegistry` is
+ * the read model every consumer — and every hand-built test fixture — has to
+ * satisfy, while this has exactly one reader. A registry built anywhere else
+ * simply has no pool list, and lints as it did before.
+ */
+const authoredNamePools = new WeakMap<ContentRegistry, readonly NamePool[]>();
 
 /** Creates an empty pack with the given id, ready to be filled in. */
 export function emptyPack(id: string): ContentPack {
@@ -99,8 +122,9 @@ export function buildRegistry(packs: ContentPack[]): ContentRegistry {
   const countries = collect(packs, (p) => p.countries);
   const crimes = collect(packs, (p) => p.crimes);
   const achievements = collect(packs, (p) => p.achievements);
+  const namePools = collectNamePools(packs);
 
-  return {
+  const registry: ContentRegistry = {
     packs: packs.map((pack) => pack.id),
     events: events.list,
     eventsById: events.byId,
@@ -120,8 +144,10 @@ export function buildRegistry(packs: ContentPack[]): ContentRegistry {
     crimesById: crimes.byId,
     achievements: achievements.list,
     achievementsById: achievements.byId,
-    namePools: collectNamePools(packs),
+    namePools: namePools.byCountry,
   };
+  authoredNamePools.set(registry, namePools.list);
+  return registry;
 }
 
 /** Reports every id that appears more than once in one collection. */
@@ -325,7 +351,8 @@ function checkEvents(reg: ContentRegistry, problems: string[]): void {
 }
 
 /**
- * Returns problem list - duplicate ids registry-wide; dangling refs
+ * Returns problem list - duplicate ids registry-wide, name pools included even
+ * though only the first pool for a country survives the build; dangling refs
  * (promotesTo, prevJobId, majors vs university majors, illness ids, countryId in
  * name pools); minAge<=maxAge; finite weight>0 (the predicate `rng.weighted`
  * itself applies, so Infinity and NaN are named too); every choice has >=1
@@ -349,11 +376,29 @@ export function validateRegistry(reg: ContentRegistry): string[] {
   reportDuplicates(problems, 'country', reg.countries);
   reportDuplicates(problems, 'crime', reg.crimes);
   reportDuplicates(problems, 'achievement', reg.achievements);
+  /* Pools from the list `buildRegistry` kept, because their map cannot show a
+     clash: the losing pool is dropped at build time, so a country with two
+     pools reads exactly like a country with one and the pack that widened a
+     pool has no other signal that none of its names ever ship. */
+  reportDuplicates(
+    problems,
+    'name pool for country',
+    (authoredNamePools.get(reg) ?? []).map((pool) => ({ id: pool.countryId }))
+  );
 
   checkJobs(reg, problems);
   checkEvents(reg, problems);
 
   for (const interaction of reg.interactions) {
+    /* The same window `checkEvents` names, worded the same, because an inverted
+       one is quieter here: `availableInteractions` filters on
+       `age >= minAge && age <= maxAge`, so a transposed pair is satisfied at no
+       age at all and the row is never handed to a sheet — no refusal, no greyed
+       out reason, no log line, just content nobody can reach in any life. */
+    const { minAge, maxAge } = interaction;
+    if (minAge !== undefined && maxAge !== undefined && minAge > maxAge) {
+      problems.push(`interaction "${interaction.id}" has minAge ${minAge} above maxAge ${maxAge}`);
+    }
     /* Through `checkNumber` like every other authored number, because a bare
        `< 0` is false for NaN and for Infinity and both are worse than a negative
        one: `canUse` gates on `cooldown > 0`, so NaN skips the gate entirely and
@@ -367,19 +412,36 @@ export function validateRegistry(reg: ContentRegistry): string[] {
   }
 
   for (const crime of reg.crimes) {
+    const subject = `crime "${crime.id}"`;
     if (crime.sentenceYears[0] > crime.sentenceYears[1]) {
-      problems.push(`crime "${crime.id}" has a reversed sentenceYears range`);
+      problems.push(`${subject} has a reversed sentenceYears range`);
     }
     /* `rng.int` answers a non-finite bound with NaN, and that NaN used to be
        written straight into the balance. The range is linted as a range so a
        pack hears about both bounds at once. */
-    if (!crime.payout.every((bound) => Number.isFinite(bound))) {
-      problems.push(`crime "${crime.id}" has a non-finite payout range`);
+    const payoutReadable = crime.payout.every((bound) => Number.isFinite(bound));
+    if (!payoutReadable) {
+      problems.push(`${subject} has a non-finite payout range`);
     } else if (crime.payout[0] > crime.payout[1]) {
-      problems.push(`crime "${crime.id}" has a reversed payout range`);
+      problems.push(`${subject} has a reversed payout range`);
     }
-    if (!crime.sentenceYears.every((bound) => Number.isFinite(bound))) {
-      problems.push(`crime "${crime.id}" has a non-finite sentenceYears range`);
+    const sentenceReadable = crime.sentenceYears.every((bound) => Number.isFinite(bound));
+    if (!sentenceReadable) {
+      problems.push(`${subject} has a non-finite sentenceYears range`);
+    }
+    /* Sign, on the floor of each range, once its bounds are readable so an
+       unreadable one is still named exactly once. Neither number is a rate that
+       may legitimately run negative the way `apprPct` and `raisePct` are: a
+       payout below zero bills the player for succeeding — the balance drops and
+       the line reads 'You got away with it. +-$300' — and a sentence below zero
+       is served as no time at all, so the term the pack authored never happens
+       and nothing says why. The floor is the only bound the sign needs: a
+       ceiling under a non-negative floor is the reversed range named above. */
+    if (payoutReadable) {
+      checkNumber(problems, subject, 'payout floor', crime.payout[0]);
+    }
+    if (sentenceReadable) {
+      checkNumber(problems, subject, 'sentenceYears floor', crime.sentenceYears[0]);
     }
   }
 

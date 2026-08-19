@@ -5,6 +5,8 @@ import { useEffect } from 'react';
 import type { ComponentType, CSSProperties, ReactElement } from 'react';
 
 import { Screen, Sheet, Toast, applyReduceMotion, applyTheme } from '@/design-system';
+/* Not re-exported by the barrel: only the shell mounts the alert layer. */
+import { AlertHost } from '@/design-system/Alert';
 import { useUiStore } from '@/store/uiStore';
 import type { ScreenId, SheetId, ToastItem } from '@/store/uiStore';
 
@@ -144,7 +146,7 @@ function ToastHost(): ReactElement {
   );
 }
 
-/** The app shell: one screen at a time, with the sheet stack and toasts above it. */
+/** The app shell: one screen at a time, with the sheet stack, alerts and toasts above it. */
 export default function App(): ReactElement {
   const screen = useUiStore((s) => s.screen);
   const theme = useUiStore((s) => s.settings.theme);
@@ -162,9 +164,13 @@ export default function App(): ReactElement {
 
   return (
     <Screen>
-      <Active />
-      <SheetHost />
-      <ToastHost />
+      {/* Alerts belong to the shell, not to the screen or sheet that raised
+          them, so their scrim covers the whole phone frame either way. */}
+      <AlertHost>
+        <Active />
+        <SheetHost />
+        <ToastHost />
+      </AlertHost>
     </Screen>
   );
 }

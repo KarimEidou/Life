@@ -143,6 +143,7 @@ function advanceCompulsory(ctx: Ctx): LogEntry[] {
   const c = ctx.state.character;
   const ed = c.education;
   const reg = ctx.reg;
+  const deskBefore = ed.enrolledIn;
   const primary = schoolAtLevel(reg, 'primary');
   const middle = schoolAtLevel(reg, 'middle');
   const high = schoolAtLevel(reg, 'high');
@@ -162,6 +163,14 @@ function advanceCompulsory(ctx: Ctx): LogEntry[] {
     completeLevel(ed, 'high');
     entries.push({ icon: '🎓', kind: 'good', text: 'You graduated high school.' });
   }
+
+  /* A year sat at the same desk is a year of that programme, exactly as it is
+     for a degree. Only an unchanged desk counts: `startSchool` and
+     `completeLevel` have just written the 0 that belongs to whichever rung this
+     year moved to, so a first year still reads as year 1 of its school. Without
+     this the counter never left 0 and all twelve compulsory years reported
+     themselves as "Year 1 of N". No draw is spent either way. */
+  if (ed.enrolledIn !== undefined && ed.enrolledIn === deskBefore) ed.year += 1;
 
   return entries;
 }
@@ -262,11 +271,34 @@ export function applyToSchool(
   if (lifeIsOver(state)) return { ok: false, reason: LIFE_OVER };
 
   const c = state.character;
+  /* Nobody matriculates from a cell: the refusal `jobRequirementsMet` gives a
+     would-be hire, in the same words. A sentence keeps an enrolment that already
+     existed — `careerPhase` hands those years to this phase — but it ends
+     attendance, and the Education sheet stays reachable throughout, so without
+     this a prisoner enrolled and `advanceDegree` billed tuition, or minted
+     student debt against someone with no income to service it, for every year of
+     the sentence. Placed above the desk heal below so a refusal writes nothing. */
+  if (c.prison) return { ok: false, reason: "You're in prison." };
+
   const ed = c.education;
   const def = findSchool(reg, schoolId);
 
   if (!def) return { ok: false, reason: 'That school does not exist.' };
   if (!isDegree(def)) return { ok: false, reason: 'That school enrols by age.' };
+
+  /* The same reconciliation `educationPhase` performs, because a save is loaded
+     into the Education sheet long before the next `ageUp` runs it: a desk no def
+     describes is not a desk. Without it the refusal below is exactly the
+     "refused by `applyToSchool` every time" dead end that heal exists to
+     prevent, and the sheet hides its Drop out button for the same unresolvable
+     id, so nothing on screen can reconcile the two. Emptying the desk is not
+     dropping out — `level` and `major` stand and the compulsory ladder still
+     picks a child up at the next rung. Consumes no randomness, like the phase's
+     heal, so replay is untouched. */
+  if (ed.enrolledIn !== undefined && !findSchool(reg, ed.enrolledIn)) {
+    ed.enrolledIn = undefined;
+    ed.year = 0;
+  }
   if (ed.enrolledIn !== undefined) return { ok: false, reason: 'You are already in school.' };
 
   if (def.level === 'university') {

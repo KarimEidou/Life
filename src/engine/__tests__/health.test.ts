@@ -291,6 +291,27 @@ describe('healthPhase onset', () => {
     createRng(mirror).chance(1);
     expect(state.rngState).toBe(mirror.rngState);
   });
+
+  /* Only a catch holds the id: a copy that missed leaves the next one its own
+     roll, so the duplicate costs the year no draw it would not otherwise spend
+     and the catch still lands exactly once. */
+  it('still rolls the duplicate of an id the first copy missed, and catches it once', () => {
+    const flu = makeIllness({ id: 'flu', label: 'the flu', onsetWeight: () => 0 });
+    const reg = registryWith([flu, makeIllness({ ...flu, onsetWeight: () => 1 })]);
+    const state = makeState();
+
+    const entries = healthPhase(makeCtx(state, reg));
+
+    expect(state.character.illnesses).toEqual([{ defId: 'flu', years: 0, treated: false }]);
+    // One hit of 20, not both copies' 20.
+    expect(state.character.stats.health).toBe(60);
+    expect(entries).toEqual([{ icon: '🤒', kind: 'health', text: 'You came down with the flu.' }]);
+    const mirror = { rngState: initialRngState(SEED) };
+    const rng = createRng(mirror);
+    rng.chance(0);
+    rng.chance(1);
+    expect(state.rngState).toBe(mirror.rngState);
+  });
 });
 
 describe('healthPhase progression', () => {
@@ -628,6 +649,33 @@ describe('healthPhase addictions', () => {
     expect(healthPhase(makeCtx(state, reg))).toEqual([alarm]);
   });
 
+  /* One latch per addiction rather than one for the character: a habit already
+     announced must not swallow the first line another habit earns, and beating
+     one back must not re-arm the other. */
+  it('latches each addiction on its own', () => {
+    const alcohol: LogEntry = {
+      icon: '🍺',
+      kind: 'bad',
+      text: 'Your alcohol addiction is taking over your life.',
+    };
+    const reg = emptyRegistry();
+    // Alcohol crossed the alarm outside the phase; gambling crosses inside it.
+    const state = makeState({ addictions: { alcohol: 60, gambling: 48 } });
+    const c = state.character;
+
+    expect(healthPhase(makeCtx(state, reg))).toEqual([
+      alcohol,
+      { icon: '🎰', kind: 'bad', text: 'Your gambling addiction is taking over your life.' },
+    ]);
+    expect(healthPhase(makeCtx(state, reg))).toEqual([]);
+
+    c.addictions.alcohol = 20;
+    expect(healthPhase(makeCtx(state, reg))).toEqual([]);
+    // Only the drinking is announced afresh; the gambling stayed over the alarm.
+    c.addictions.alcohol = 60;
+    expect(healthPhase(makeCtx(state, reg))).toEqual([alcohol]);
+  });
+
   it('stays quiet while an addiction is still mild', () => {
     const state = makeState({ addictions: { smoking: 10 } });
 
@@ -643,6 +691,22 @@ describe('healthPhase addictions', () => {
     healthPhase(makeCtx(state, emptyRegistry()));
 
     expect(state.character.money).toBe(0);
+  });
+
+  it('settles a balance that is already unreadable', () => {
+    /* The toll is always readable — severity is a `clampStat` output — so the
+       only poison this write can meet is the balance itself, and written as
+       `Math.max(0, Math.round(money - toll))` it handed that poison back
+       untouched, year after year. See `clampMoney`'s own comment. */
+    for (const poison of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const state = makeState({ money: poison, addictions: { drugs: 60 } });
+
+      healthPhase(makeCtx(state, emptyRegistry()));
+
+      expect(state.character.money).toBe(0);
+      // The rest of the toll still landed; only the balance was refused.
+      expect(state.character.addictions.drugs).toBe(63);
+    }
   });
 
   it('leaves a cleared addiction alone and caps severity at 100', () => {

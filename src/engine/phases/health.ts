@@ -25,7 +25,7 @@
  * ${label} ...`) would demand a bare noun and no single label can satisfy both.
  */
 
-import { clampStat } from '@/engine/effects';
+import { clampMoney, clampStat } from '@/engine/effects';
 import type {
   AddictionKey,
   ContentRegistry,
@@ -198,7 +198,12 @@ export function healthPhase(ctx: Ctx): LogEntry[] {
     c.addictions[key] = severity;
     c.stats.health = clampStat(c.stats.health - severity / ADDICTION_HEALTH_DIVISOR);
     c.stats.happiness = clampStat(c.stats.happiness - severity / ADDICTION_HAPPINESS_DIVISOR);
-    c.money = Math.max(0, Math.round(c.money - severity * ADDICTION_COST_PER_SEVERITY));
+    /* `clampMoney`, never `Math.max(0, ...)`: the toll itself is always readable
+       — `severity` is a `clampStat` output — so what this write has to survive
+       is the balance it reads. `Math.max(0, NaN)` is NaN, which handed a
+       poisoned balance straight back every year instead of settling it. See
+       `clampMoney`'s own comment. */
+    c.money = clampMoney(c.money - severity * ADDICTION_COST_PER_SEVERITY, c.money);
     if (severity >= ADDICTION_ALARM && c.flags[latch] !== true) {
       c.flags[latch] = true;
       entries.push({

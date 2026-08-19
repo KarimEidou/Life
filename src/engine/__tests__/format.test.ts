@@ -138,6 +138,16 @@ describe('fmtMoneyCompact', () => {
     expect(fmtMoneyCompact(999999)).toBe('$1M');
     expect(fmtMoneyCompact(1000000000)).toBe('$1B');
     expect(fmtMoneyCompact(2400000000)).toBe('$2.4B');
+    // The B tier carries the same way: one dollar below the boundary still
+    // reads in B, and the boundary itself must not print "$1000B".
+    expect(fmtMoneyCompact(999_949_999_999)).toBe('$999.9B');
+    expect(fmtMoneyCompact(999_950_000_000)).toBe('$1T');
+  });
+
+  it('uses T above a thousand billion', () => {
+    expect(fmtMoneyCompact(1_000_000_000_000)).toBe('$1T');
+    expect(fmtMoneyCompact(1_250_000_000_000)).toBe('$1.3T');
+    expect(fmtMoneyCompact(-2_000_000_000_000)).toBe('-$2T');
   });
 });
 

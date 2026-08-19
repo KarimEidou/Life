@@ -3,6 +3,7 @@ import type { CSSProperties, ReactElement } from 'react';
 
 import { getRegistry } from '@/content';
 import { Alert, Card, ListRow, MoneyText, SectionHeader } from '@/design-system';
+import { clampMoney } from '@/engine/effects';
 import { fmtMoney, fmtMoneyCompact } from '@/engine/format';
 import { useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
@@ -14,6 +15,19 @@ const quietStyle: CSSProperties = {
   color: 'var(--label-2)',
   fontSize: 'var(--fs-subhead)',
 };
+
+/**
+ * Mirrors `RESALE_RATE` in `src/engine/phases/finance.ts` — the share of an
+ * asset's value a sale actually fetches — which is module-private there. The
+ * confirmation is the only screen where the player decides, so it has to quote
+ * what `sellAsset` pays, not the book value on the row.
+ */
+const RESALE_RATE = 0.9;
+
+/** What `sellAsset` hands over for an asset, before any secured loan is settled. */
+function proceedsOf(asset: OwnedAsset): number {
+  return clampMoney(asset.value * RESALE_RATE);
+}
 
 /** Owned properties and vehicles, plus everything on the market. */
 export function AssetsSheet(): ReactElement | null {
@@ -31,7 +45,23 @@ export function AssetsSheet(): ReactElement | null {
 
   const sell = (asset: OwnedAsset): void => {
     setSellTarget(null);
+    const proceeds = proceedsOf(asset);
     useGameStore.getState().sellAsset(asset.id);
+    /* `sellAsset` returns nothing and refuses silently on a finished life, so
+       the asset going is the only evidence the sale happened. */
+    const after = useGameStore.getState().game?.character.assets ?? [];
+    if (!after.some((held) => held.id === asset.id)) {
+      const title = `Sold ${asset.label} for ${fmtMoney(proceeds)}.`;
+      useUiStore.getState().addToast({ icon: '💵', title });
+    }
+  };
+
+  const sellMessage = (asset: OwnedAsset): string => {
+    /* A loan secured against the asset is settled out of the proceeds before any
+       of it reaches the balance, so the player has to see both numbers. */
+    const owed = c.loans.find((loan) => loan.assetId === asset.id)?.principal ?? 0;
+    const owedNote = owed > 0 ? `, less ${fmtMoney(owed)} still owed on it` : '';
+    return `Sells for ${fmtMoney(proceedsOf(asset))}${owedNote}.`;
   };
 
   const buy = (def: AssetDef, withLoan: boolean): void => {
@@ -94,7 +124,7 @@ export function AssetsSheet(): ReactElement | null {
         <Alert
           open
           title={`Sell ${sellTarget.label}?`}
-          message={`Its value is ${fmtMoney(sellTarget.value)}.`}
+          message={sellMessage(sellTarget)}
           actions={[
             {
               label: 'Sell',

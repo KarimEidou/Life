@@ -301,6 +301,7 @@ const mindBody: InteractionDef[] = [
     label: 'Meditate',
     icon: '🧘',
     minAge: 8,
+    condition: free,
     resolve: () => ({
       text: 'Twenty minutes of sitting still. Eighteen of them were thinking about lunch.',
       effects: [
@@ -393,6 +394,7 @@ const fun: InteractionDef[] = [
     label: 'Play Video Games',
     icon: '🎮',
     minAge: 5,
+    condition: free,
     resolve: (ctx: Ctx) => ({
       text: ctx.rng.chance(0.5)
         ? 'You beat the final boss on the eleventh try.'
@@ -476,6 +478,7 @@ const fun: InteractionDef[] = [
     label: 'Board Game Night',
     icon: '🎲',
     minAge: 5,
+    condition: free,
     resolve: () => ({
       text: 'Four hours, one winner, three people rereading the rulebook.',
       effects: [
@@ -902,10 +905,9 @@ const pets: InteractionDef[] = [
       const list = alivePets(ctx.state);
       const pet = list.length > 0 ? ctx.rng.pick(list) : undefined;
       if (!pet) {
-        return {
-          text: 'You had nobody to take, and the vet charged you anyway.',
-          effects: [{ kind: 'money', delta: 200 }],
-        };
+        // The `cost` above is the charge the line describes; refunding it here
+        // would net the visit to $0 and say the opposite of what happened.
+        return { text: 'You had nobody to take, and the vet charged you anyway.', effects: [] };
       }
       const name = firstNameOf(pet);
       return {

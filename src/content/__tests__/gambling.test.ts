@@ -1,16 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
+import type { BlackjackTable } from '@/content/gambling';
 import {
   LOTTERY_TIERS,
   SLOT_SYMBOLS,
   TICKET_PRICE,
+  blackjackHit,
+  blackjackStand,
   buyLottery,
+  foldBlackjack,
   slotMultiplier,
   spinSlots,
+  startBlackjack,
 } from '@/content/gambling';
 import { buildRegistry } from '@/engine/registry';
 import { createLife } from '@/engine/state';
-import type { ContentRegistry, GameState } from '@/types';
+import type { ContentRegistry, GameState, LogEntry } from '@/types';
 
 /**
  * Slots paytable contract.
@@ -220,5 +225,131 @@ describe('buyLottery over a long run', () => {
     expect((hits.get(20) ?? 0) / TICKETS).toBeLessThan(0.0416);
     expect(hits.get(500) ?? 0).toBeGreaterThan(60);
     expect(hits.get(500) ?? 0).toBeLessThan(140);
+  });
+});
+
+/**
+ * Walking away from an unfinished hand.
+ *
+ * The stake is charged as the hand is dealt and only `settleHand` ever pays
+ * anything back, which takes playing the hand out — something a life that has
+ * ended can no longer do. A hand still open at the moment of death was
+ * therefore unresolvable: the money stayed taken with no line in the feed to
+ * account for it, and the table stayed `done: false` for whatever the store
+ * persisted next, so a reload restored the same stuck hand onto a dead life.
+ */
+
+const BLACKJACK_BET = 500;
+
+/** The year the character is living, which is where the casino logs. */
+function feed(state: GameState): LogEntry[] {
+  const year = state.log[state.log.length - 1];
+  if (year === undefined) throw new Error('expected a year log');
+  return year.entries;
+}
+
+/** Deals until a hand survives the deal; a dealt 21 settles on the spot. */
+function dealOpenHand(state: GameState): { table: BlackjackTable; held: number } {
+  for (let i = 0; i < 100; i += 1) {
+    const held = state.character.money;
+    const table = startBlackjack(state, EMPTY, BLACKJACK_BET);
+    if (!table.done) return { table, held };
+  }
+  throw new Error('expected an open blackjack table');
+}
+
+describe('foldBlackjack', () => {
+  it('hands the stake back, closes the table and draws nothing', () => {
+    const state = gambler(3, 5000);
+    const { table, held } = dealOpenHand(state);
+    expect(state.character.money).toBe(held - BLACKJACK_BET);
+
+    const lines = feed(state).length;
+    const cursor = state.rngState;
+    const folded = foldBlackjack(state, table);
+
+    expect(folded.done).toBe(true);
+    expect(folded.result).toBe('push');
+    expect(folded.payout).toBe(BLACKJACK_BET);
+    expect(state.character.money).toBe(held);
+    /* No card is drawn, so a folded hand cannot shift a later roll. */
+    expect(state.rngState).toBe(cursor);
+
+    const written = feed(state).slice(lines);
+    expect(written).toHaveLength(1);
+    expect(written[0]?.kind).toBe('money');
+    expect(written[0]?.text).toContain('$500');
+  });
+
+  it('leaves a finished hand alone rather than paying its stake twice', () => {
+    const state = gambler(3, 5000);
+    const { table } = dealOpenHand(state);
+    const folded = foldBlackjack(state, table);
+
+    const money = state.character.money;
+    const lines = feed(state).length;
+    const again = foldBlackjack(state, folded);
+
+    expect(again).toBe(folded);
+    expect(state.character.money).toBe(money);
+    expect(feed(state)).toHaveLength(lines);
+  });
+
+  it('books no stake at all for a table carrying an unreadable bet', () => {
+    /* `payout` is what the store and the sheet do their arithmetic against, so
+       a poisoned stake has to widen to nothing here rather than travel on. */
+    const state = gambler(3, 5000);
+    const { table } = dealOpenHand(state);
+    const money = state.character.money;
+    const folded = foldBlackjack(state, { ...table, bet: Number.NaN });
+
+    expect(folded.payout).toBe(0);
+    expect(state.character.money).toBe(money);
+  });
+});
+
+describe('a hand still open when the life ends', () => {
+  it('folds on a stand instead of stranding the stake', () => {
+    const state = gambler(3, 5000);
+    const { table, held } = dealOpenHand(state);
+    const lines = feed(state).length;
+    state.phase = 'dead';
+
+    const settled = blackjackStand(state, table);
+
+    expect(settled.done).toBe(true);
+    expect(state.character.money).toBe(held);
+    expect(feed(state).slice(lines).map((entry) => entry.text)).toEqual([
+      'Blackjack: left the table mid-hand. Your $500 came back.',
+    ]);
+    /* A dead life is still closed to play: the dealer drew no hole card. */
+    expect(settled.dealer).toEqual(table.dealer);
+  });
+
+  it('folds on a hit instead of stranding the stake', () => {
+    const state = gambler(3, 5000);
+    const { table, held } = dealOpenHand(state);
+    const cursor = state.rngState;
+    state.phase = 'dead';
+
+    const settled = blackjackHit(state, table);
+
+    expect(settled.done).toBe(true);
+    expect(settled.player).toEqual(table.player);
+    expect(state.character.money).toBe(held);
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('never counts an unfinished hand as one played', () => {
+    const state = gambler(3, 5000);
+    const { table } = dealOpenHand(state);
+    const played = state.character.flags['casino:handsPlayed'];
+    const habit = state.character.addictions.gambling;
+    state.phase = 'dead';
+
+    blackjackStand(state, table);
+
+    expect(state.character.flags['casino:handsPlayed']).toBe(played);
+    expect(state.character.addictions.gambling).toBe(habit);
   });
 });

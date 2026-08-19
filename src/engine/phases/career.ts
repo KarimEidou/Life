@@ -153,8 +153,9 @@ function rollPromotion(ctx: Ctx, def: JobDef): LogEntry | undefined {
 }
 
 /**
- * Works one year: retires anyone old enough before the year starts, otherwise
- * counts the service, moves performance and rolls promotion, firing or layoff.
+ * Works one year: settles anything that ends the job — retirement, a firing, a
+ * layoff — before the year starts, otherwise counts the service, moves
+ * performance and rolls the promotion.
  * The wage itself is settled by the finance phase, which runs after this one.
  */
 export function careerPhase(ctx: Ctx): LogEntry[] {
@@ -205,31 +206,14 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
     return entries;
   }
 
-  job.years += 1;
-  const effort = job.workHard ? EFFORT_HARD : EFFORT_COASTING;
-  const drag = c.stats.health < SICK_HEALTH ? SICK_PENALTY : 0;
-  job.performance = clampStat(
-    job.performance + effort + ctx.rng.normal(0, PERFORMANCE_SD) - drag
-  );
-
-  /* The effort bonus is paid for in stats, charged for every year the switch was
-     on and the year was actually worked — the prison branch returned above. It
-     costs no draw, so the yearly rng budget is unchanged. */
-  if (job.workHard) {
-    c.stats.health = clampStat(c.stats.health - WORK_HARD_HEALTH);
-    c.stats.happiness = clampStat(c.stats.happiness - WORK_HARD_HAPPINESS);
-  }
-
-  const def = findJob(ctx.reg, job.jobId);
-  if (def) {
-    job.salary = Math.round(job.salary * (1 + contentNumber(def.raisePct, 0)));
-    const promotion = rollPromotion(ctx, def);
-    if (promotion) {
-      entries.push(promotion);
-      return entries;
-    }
-  }
-
+  /* The other two ways out of a job are settled before the year is worked for
+     the same reason retirement is: the finance phase reads `c.job` after this
+     one, so a seat emptied here is never paid for. Rolled at the top, against
+     the standing the employer saw all of last year, a firing or a layoff costs
+     the character the job and nothing else — no service counted, no effort
+     charged, no raise paid into a year that is then settled at no wage at all.
+     The firing chance stays guarded on the standing, so a worker who is not on
+     the way out still rolls nothing for it. */
   if (job.performance < FIRING_PERFORMANCE && ctx.rng.chance(FIRING_CHANCE)) {
     c.flags.lastJobTitle = job.title;
     c.job = null;
@@ -250,6 +234,30 @@ export function careerPhase(ctx: Ctx): LogEntry[] {
     c.money = clampMoney(c.money + severance, c.money);
     c.job = null;
     entries.push({ icon: '📦', kind: 'bad', text: 'You were laid off.' });
+    return entries;
+  }
+
+  job.years += 1;
+  const effort = job.workHard ? EFFORT_HARD : EFFORT_COASTING;
+  const drag = c.stats.health < SICK_HEALTH ? SICK_PENALTY : 0;
+  job.performance = clampStat(
+    job.performance + effort + ctx.rng.normal(0, PERFORMANCE_SD) - drag
+  );
+
+  /* The effort bonus is paid for in stats, charged for every year the switch was
+     on and the year was actually worked — the branches that work no year at all,
+     prison and the three that end the job, have all returned above. It costs no
+     draw, so the yearly rng budget is unchanged. */
+  if (job.workHard) {
+    c.stats.health = clampStat(c.stats.health - WORK_HARD_HEALTH);
+    c.stats.happiness = clampStat(c.stats.happiness - WORK_HARD_HAPPINESS);
+  }
+
+  const def = findJob(ctx.reg, job.jobId);
+  if (def) {
+    job.salary = Math.round(job.salary * (1 + contentNumber(def.raisePct, 0)));
+    const promotion = rollPromotion(ctx, def);
+    if (promotion) entries.push(promotion);
   }
 
   return entries;

@@ -27,9 +27,15 @@ import type {
 /** Genders a generated person is rolled as. */
 const GENDERS: readonly Gender[] = ['male', 'female'];
 
-/** Keeps an affinity inside the 0..100 the engine stores. */
+/** Keeps an affinity inside the 0..100 the engine stores, healing the way
+ *  `clampStat` does: an unreadable `rel` out of a drifted save settles at 0
+ *  rather than being written back, because `relationshipsPhase.drift` carries a
+ *  NaN affinity forward untouched (`Math.max(0, NaN)`) for every kin this
+ *  touches, so a poisoned one would never recover. */
 function clampRel(n: number): number {
-  return Math.max(0, Math.min(100, Math.round(n)));
+  if (!Number.isFinite(n)) return 0;
+  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
+  return Math.round(bounded * 10) / 10;
 }
 
 /** Every living person of one relationship kind, in the order they joined the life. */
@@ -475,7 +481,7 @@ const events: EventDef[] = [
           },
           {
             weight: 4,
-            text: 'You were told to get a job. You are fourteen.',
+            text: 'You were told to get a job. You are {age}.',
             effects: [{ kind: 'stat', stat: 'happiness', delta: -4 }],
           },
         ],
@@ -1031,6 +1037,7 @@ const events: EventDef[] = [
     minAge: 16,
     maxAge: 17,
     weight: 5,
+    oncePerLife: true,
     condition: (ctx) => free(ctx) && hasParent(ctx),
     text: (ctx) =>
       `Your first driving lesson, in ${ctx.rng.pick([

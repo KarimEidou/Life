@@ -96,7 +96,10 @@ function logLine(state: GameState, icon: string, text: string, kind: LogKind): v
   currentYearLog(state).entries.push({ icon, text, kind });
 }
 
-/** A finished life is read-only: no game may charge it or pay it. */
+/**
+ * A finished life is closed to play: it may not be charged, dealt to, or played
+ * out. Handing a stake back is not play — see `foldBlackjack`.
+ */
 function tableClosed(state: GameState): boolean {
   return state.phase === 'dead';
 }
@@ -255,7 +258,8 @@ export function startBlackjack(
  * A total of exactly 21 stands itself, so nobody has to click twice.
  */
 export function blackjackHit(state: GameState, table: BlackjackTable): BlackjackTable {
-  if (table.done || tableClosed(state)) return table;
+  if (table.done) return table;
+  if (tableClosed(state)) return foldBlackjack(state, table);
 
   const rng = createRng(state);
   const player = [...table.player, drawCard(rng)];
@@ -268,7 +272,8 @@ export function blackjackHit(state: GameState, table: BlackjackTable): Blackjack
 
 /** Dealer draws to 17, pays winnings into `character.money` and logs one summary line. */
 export function blackjackStand(state: GameState, table: BlackjackTable): BlackjackTable {
-  if (table.done || tableClosed(state)) return table;
+  if (table.done) return table;
+  if (tableClosed(state)) return foldBlackjack(state, table);
 
   const rng = createRng(state);
   const dealer = [...table.dealer];
@@ -285,6 +290,38 @@ export function blackjackStand(state: GameState, table: BlackjackTable): Blackja
   }
   if (shown.playerTotal === dealerTotal) return settleHand(state, shown, 'push', shown.bet);
   return settleHand(state, shown, 'lose', 0);
+}
+
+/**
+ * Hands an unfinished hand's stake back and closes the table.
+ *
+ * `startBlackjack` charges the moment it deals, and `settleHand` — the only
+ * path that pays anything back — is reached only by playing the hand out, which
+ * a life that has ended can no longer do. Without this, a hand still open when
+ * the character dies holds a stake nothing can return, stays `done: false` for
+ * whatever the caller persists, and leaves the feed with no line to account for
+ * the money. A fold ends it instead: the bet comes back exactly as it went in.
+ *
+ * It is not a hand played — no habit, no `casino:handsPlayed` — and it draws no
+ * card, so it never shifts a later roll. Fold while the character is still
+ * alive wherever that is possible, so the refund is inside the balance the
+ * obituary snapshots; folding afterwards still returns the money rather than
+ * losing it. A hand already finished comes back untouched, so a caller may
+ * offer the fold without ever paying one stake twice.
+ */
+export function foldBlackjack(state: GameState, table: BlackjackTable): BlackjackTable {
+  if (table.done) return table;
+
+  const stake = Number.isFinite(table.bet) ? Math.max(0, Math.round(table.bet)) : 0;
+  const folded: BlackjackTable = { ...table, done: true, result: 'push', payout: stake };
+  payOut(state, stake);
+  logLine(
+    state,
+    BLACKJACK_ICON,
+    `Blackjack: left the table mid-hand. Your ${fmtMoney(stake)} came back.`,
+    'money'
+  );
+  return folded;
 }
 
 /* ------------------------------------------------------------------ */

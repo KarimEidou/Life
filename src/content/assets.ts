@@ -5,9 +5,10 @@ import type { AssetDef, ContentPack } from '@/types';
  *
  * Terms are uniform per family and set here rather than per row, because the
  * finance phase reads them every single year: property carries light upkeep and
- * appreciates, a vehicle costs a tenth of that to keep and loses value from the
- * moment it leaves the lot. Only the price and the label change down the list,
- * so a ladder from a $2,000 beater to a $5,000,000 villa stays readable.
+ * appreciates, while a vehicle costs several times as much a year to keep and
+ * loses value from the moment it leaves the lot. Only the price and the label
+ * change down the list, so a ladder from a $2,000 beater to a $5,000,000 villa
+ * stays readable.
  *
  * Ids are load-bearing beyond this file: the achievements pack counts owned
  * assets by the `prop-` and `veh-` prefixes, and the finance phase gates

@@ -31,7 +31,6 @@ const panelStyle: CSSProperties = {
   position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  maxHeight: '90%',
   background: 'var(--bg-elevated)',
   borderTopLeftRadius: 'var(--r-lg)',
   borderTopRightRadius: 'var(--r-lg)',
@@ -71,6 +70,7 @@ export function Sheet({
   }
   const canDismiss = dismissible !== false;
   const still = reduceMotion === true;
+  const full = height === 'full';
   return (
     <div style={{ ...overlayStyle, pointerEvents: present ? 'auto' : 'none' }}>
       <motion.div
@@ -81,8 +81,10 @@ export function Sheet({
         transition={still ? { duration: 0 } : { duration: 0.2 }}
         onClick={canDismiss ? onClose : undefined}
       />
+      {/* `max-height` clamps `height`, so both have to come from the prop —
+          a fixed cap here would silently keep a `full` sheet off the top edge. */}
       <motion.div
-        style={{ ...panelStyle, height: height === 'full' ? '100%' : 'auto' }}
+        style={{ ...panelStyle, height: full ? '100%' : 'auto', maxHeight: full ? '100%' : '90%' }}
         initial={{ y: '100%' }}
         animate={{ y: 0 }}
         exit={{ y: '100%' }}

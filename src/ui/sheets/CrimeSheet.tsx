@@ -35,6 +35,16 @@ const dimStyle: CSSProperties = {
 };
 
 /**
+ * Half again the rolled sentence, from the second conviction on.
+ *
+ * `commitCrime` keeps its `REPEAT_OFFENDER_MULT` private, so the ceiling a row
+ * promises and the one the engine hands down can only be held in step by hand.
+ * They have to be: on a crime whose term is rolled at the top of its range, a
+ * repeat offender serves half again the number an unscaled row advertises.
+ */
+const REPEAT_OFFENDER_MULT = 1.5;
+
+/**
  * One count off a stored sentence, read defensively.
  *
  * `PrisonState` comes back from `JSON.parse` on every load and `loadGame` checks
@@ -77,7 +87,9 @@ export function CrimeSheet(): ReactElement | null {
                 the next age-up, which is what the line below promises. */}
             <ProgressBar value={total > 0 ? ((total - left) / total) * 100 : 0} animated />
             <div style={metaStyle}>
-              {left > 0 ? `${left} of ${total} years left` : 'Out by the end of the year'}
+              {left > 0
+                ? `${left} of ${total} ${total === 1 ? 'year' : 'years'} left`
+                : 'Out by the end of the year'}
             </div>
           </div>
         </Card>
@@ -110,11 +122,20 @@ export function CrimeSheet(): ReactElement | null {
     );
   }
 
+  /* Read the record the way `commitCrime` reads it — flags are free-form JSON
+     and a coercible one counts there — so the ceiling below is the term the
+     next conviction can actually carry, not the roll it starts from. */
+  const convictions = Number(c.flags.convictions ?? 0);
+  const repeatOffender = Number.isFinite(convictions) && convictions > 0;
+
   return (
     <SheetChrome id="crime" title="Crime">
       <div style={listGroupStyle}>
         {reg.crimes.map((crime) => {
           const tooYoung = c.age < crime.minAge;
+          const maxYears = repeatOffender
+            ? Math.round(crime.sentenceYears[1] * REPEAT_OFFENDER_MULT)
+            : crime.sentenceYears[1];
           return (
             // Underage rows dim but stay tappable; the engine refuses safely.
             <div key={crime.id} style={tooYoung ? dimStyle : undefined}>
@@ -125,7 +146,7 @@ export function CrimeSheet(): ReactElement | null {
                 subtitle={
                   tooYoung
                     ? "You're too young."
-                    : `${fmtMoneyCompact(crime.payout[0])}–${fmtMoneyCompact(crime.payout[1])} · up to ${crime.sentenceYears[1]} yr`
+                    : `${fmtMoneyCompact(crime.payout[0])}–${fmtMoneyCompact(crime.payout[1])} · up to ${maxYears} yr`
                 }
                 onClick={() => {
                   const r = useGameStore.getState().crime(crime.id);

@@ -837,6 +837,43 @@ describe('commitCrime', () => {
     }
   });
 
+  it('never builds a cell the sentence bar cannot divide by', () => {
+    /* The invariant the crime sheet renders against, pinned over the whole roll
+       rather than a forced `[0, 0]`: a conviction is either no cell at all or a
+       term with time left to serve, never `{ yearsLeft: 0, totalYears: 0 }` — a
+       sentence that fills the bar to "0 of 0 years left" while the sheet is
+       still the prison view and every `free()` row refuses. `[0, 1]` is the
+       shipped range on four of the ten crimes, so both sides of it are ordinary
+       play, and the repeat-offender multiplier must not round a term back down
+       into a cell with nothing in it either. */
+    const reg = regOf({ crimes: [crime({ successChance: () => 0, sentenceYears: [0, 1] })] });
+    let noCell = 0;
+    let served = 0;
+
+    for (const priors of [0, 2]) {
+      for (let seed = 1; seed <= 40; seed += 1) {
+        const state = newLife(seed);
+        state.character.flags.convictions = priors;
+
+        commitCrime(state, reg, 'shoplift');
+
+        const prison = state.character.prison;
+        expect(state.character.flags.convictions).toBe(priors + 1);
+        if (prison === null) {
+          noCell += 1;
+          continue;
+        }
+        served += 1;
+        expect(prison.yearsLeft).toBeGreaterThanOrEqual(1);
+        expect(prison.totalYears).toBeGreaterThanOrEqual(prison.yearsLeft);
+      }
+    }
+
+    // Neither branch may pass by never happening: the roll reaches both.
+    expect(noCell).toBeGreaterThan(0);
+    expect(served).toBeGreaterThan(0);
+  });
+
   it('serves no sentence for a term that is not a number, instead of a cell with no exit', () => {
     /* The sentence twin of the payout guard above. `rng.int` answers a NaN
        bound with NaN and an infinite one with Infinity, and `careerPhase` ends

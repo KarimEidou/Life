@@ -36,7 +36,11 @@ export function fmtMoneyCompact(n: number): string {
   if (thousands < 1000) return `${sign}$${thousands}K`;
   const millions = round1(abs / 1e6);
   if (millions < 1000) return `${sign}$${millions}M`;
-  return `${sign}$${round1(abs / 1e9)}B`;
+  const billions = round1(abs / 1e9);
+  if (billions < 1000) return `${sign}$${billions}B`;
+  // T is the top tier, so it has nothing to carry into: past $999.95T the
+  // string widens instead of promoting.
+  return `${sign}$${round1(abs / 1e12)}T`;
 }
 
 /** Name of the current spouse, else the current partner, else undefined. */

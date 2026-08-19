@@ -38,6 +38,7 @@ export function AchievementsSheet(): ReactElement | null {
                 icon="🔒"
                 title="???"
                 subtitle="Secret achievement"
+                disabled
               />
             );
           }

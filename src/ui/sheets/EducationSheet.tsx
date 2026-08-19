@@ -64,6 +64,14 @@ export function EducationSheet(): ReactElement | null {
     (school) => school.level === 'university' || school.level === 'postgrad'
   );
 
+  /* Every major a degree can actually be earned in: `applyToSchool` writes
+     `education.major` from a university's list and from nowhere else, so a
+     postgrad programme that accepts all of them turns nobody away and is not
+     worth spelling out in a row subtitle. */
+  const taught = new Set(
+    reg.schools.flatMap((school) => (school.level === 'university' ? (school.majors ?? []) : []))
+  );
+
   const apply = (schoolId: string, major?: string): void => {
     const r = useGameStore.getState().applyToSchool(schoolId, major);
     useUiStore
@@ -118,26 +126,39 @@ export function EducationSheet(): ReactElement | null {
         <SectionHeader>Apply</SectionHeader>
         <div style={listGroupStyle}>
           {applyable.map((school) => {
-            const majors = school.majors;
-            const hasMajors = majors !== undefined && majors.length > 0;
+            /* `SchoolDef.majors` is overloaded by level and `applyToSchool` reads
+               it both ways: a university offers them — it validates the picked
+               major against the list and records it — while a postgrad programme
+               lists the undergrad majors it accepts, matches them against the
+               degree already held and discards any major passed in. So only a
+               university may show them as a chooser; a postgrad row applies in
+               one tap and names its list as the entry requirement it is. */
+            const majors = school.majors ?? [];
+            const chooseMajor = school.level === 'university' && majors.length > 0;
             const isOpen = expanded === school.id;
             const gpaNote = school.minGpa !== undefined ? ` · GPA ${school.minGpa}+` : '';
+            const acceptsAll =
+              taught.size > 0 && [...taught].every((major) => majors.includes(major));
+            const acceptsNote =
+              chooseMajor || majors.length === 0
+                ? ''
+                : ` · Accepts ${acceptsAll ? 'any major' : majors.join(', ')}`;
             return (
               <div key={school.id}>
                 <ListRow
                   testId={`school-row-${school.id}`}
                   title={school.label}
-                  subtitle={`${fmtMoneyCompact(school.tuitionPerYear)}/yr${gpaNote}`}
-                  chevron={hasMajors}
+                  subtitle={`${fmtMoneyCompact(school.tuitionPerYear)}/yr${gpaNote}${acceptsNote}`}
+                  chevron={chooseMajor}
                   onClick={() => {
-                    if (hasMajors) {
+                    if (chooseMajor) {
                       setExpanded(isOpen ? null : school.id);
                     } else {
                       apply(school.id);
                     }
                   }}
                 />
-                {hasMajors && isOpen
+                {chooseMajor && isOpen
                   ? majors.map((major) => (
                       <div key={major} style={majorIndentStyle}>
                         <ListRow

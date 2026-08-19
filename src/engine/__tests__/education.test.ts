@@ -225,6 +225,53 @@ describe('educationPhase compulsory ladder', () => {
     expect(state.character.education.enrolledIn).toBe('ps');
   });
 
+  it('counts the years at each desk so the progress readout advances', () => {
+    /* `EducationState.year` is what the Education sheet renders as
+       "Year {year + 1} of {school.years}". The ladder used to leave it at the 0
+       `startSchool` writes, so all twelve compulsory years reported themselves
+       as year 1 while the GPA beside them moved every year. */
+    const state = makeState({ age: 6 });
+    const reg = makeRegistry();
+    const readout: string[] = [];
+
+    for (let age = 6; age <= 18; age += 1) {
+      state.character.age = age;
+      educationPhase(makeCtx(state, reg));
+      const ed = state.character.education;
+      const desk = reg.schools.find((school) => school.id === ed.enrolledIn);
+      readout.push(desk ? `${desk.label} year ${ed.year + 1} of ${desk.years}` : 'out of school');
+    }
+
+    // Every rung walks its whole length exactly once and never overshoots it.
+    expect(readout).toEqual([
+      'Sunnyside Elementary year 1 of 5',
+      'Sunnyside Elementary year 2 of 5',
+      'Sunnyside Elementary year 3 of 5',
+      'Sunnyside Elementary year 4 of 5',
+      'Sunnyside Elementary year 5 of 5',
+      'Sunnyside Middle year 1 of 3',
+      'Sunnyside Middle year 2 of 3',
+      'Sunnyside Middle year 3 of 3',
+      'Sunnyside High year 1 of 4',
+      'Sunnyside High year 2 of 4',
+      'Sunnyside High year 3 of 4',
+      'Sunnyside High year 4 of 4',
+      'out of school',
+    ]);
+  });
+
+  it('does not count a year with no desk to sit at', () => {
+    const state = makeState({
+      age: 15,
+      education: { level: 'middle', year: 0, gpa: 2.1, studyHard: false },
+      flags: { droppedOut: true },
+    });
+
+    educationPhase(makeCtx(state, makeRegistry()));
+
+    expect(state.character.education.year).toBe(0);
+  });
+
   it('never re-enrols a dropout', () => {
     const state = makeState({
       age: 14,
@@ -484,6 +531,33 @@ describe('applyToSchool', () => {
     expect(accepted.character.education.enrolledIn).toBe('med');
     // The bachelor's major is what a postgrad school matched on; it is kept.
     expect(accepted.character.education.major).toBe('biology');
+  });
+
+  it('decides a postgrad application on the degree held, whatever major is passed in', () => {
+    /* A postgrad `majors` list is the undergrad majors the programme accepts,
+       never a menu it teaches, so a major offered up with the application picks
+       nothing: it cannot buy admission and it cannot rewrite the degree. The
+       Education sheet applies to a postgrad row in one tap for that reason. */
+    const reg = makeRegistry();
+
+    const wrongDegree = makeState({
+      age: 24,
+      education: { level: 'university', major: 'cs', year: 0, gpa: 3.5, studyHard: false },
+    });
+    expect(applyToSchool(wrongDegree, reg, 'med', 'biology')).toEqual({
+      ok: false,
+      reason: 'Your major does not qualify.',
+    });
+    expect(wrongDegree.character.education.enrolledIn).toBeUndefined();
+    expect(wrongDegree.character.education.major).toBe('cs');
+
+    const admitted = makeState({
+      age: 24,
+      education: { level: 'university', major: 'biology', year: 0, gpa: 3.5, studyHard: false },
+    });
+    expect(applyToSchool(admitted, reg, 'med', 'cs')).toEqual({ ok: true });
+    expect(admitted.character.education.enrolledIn).toBe('med');
+    expect(admitted.character.education.major).toBe('biology');
   });
 });
 
@@ -817,6 +891,145 @@ describe('educationPhase content drift', () => {
 
     expect(state.character.education.enrolledIn).toBeUndefined();
     expect(entries).toEqual([]);
+  });
+});
+
+describe('applyToSchool content drift', () => {
+  /* The desk-emptying heal used to live in `educationPhase` alone, but a save is
+     loaded into the Education sheet long before the next `ageUp` runs it. */
+
+  it('heals a desk the registry no longer describes instead of refusing forever', () => {
+    // The update pulled `uni`; the autosave still names it, and no phase has run.
+    const drifted = makeRegistry([PRIMARY, MIDDLE, HIGH, CITY_UNI, MED]);
+    const state = makeState({
+      age: 20,
+      money: 100000,
+      education: {
+        level: 'high',
+        enrolledIn: 'uni',
+        major: 'cs',
+        year: 2,
+        gpa: 3.2,
+        studyHard: false,
+      },
+    });
+    const cursor = state.rngState;
+
+    expect(applyToSchool(state, drifted, 'city', 'cs')).toEqual({ ok: true });
+
+    const ed = state.character.education;
+    expect(ed.enrolledIn).toBe('city');
+    expect(ed.year).toBe(0);
+    expect(ed.level).toBe('high');
+    expect(lastEntries(state)).toEqual([
+      { icon: '🎓', kind: 'info', text: 'You enrolled at City University.' },
+    ]);
+    // Mirrors the phase's heal: reconciling the desk spends no draw.
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('still refuses an applicant sitting at a desk the registry does describe', () => {
+    const state = makeState({
+      age: 20,
+      education: {
+        level: 'high',
+        enrolledIn: 'uni',
+        major: 'cs',
+        year: 2,
+        gpa: 3.2,
+        studyHard: false,
+      },
+    });
+
+    expect(applyToSchool(state, makeRegistry(), 'med')).toEqual({
+      ok: false,
+      reason: 'You are already in school.',
+    });
+    // A real enrolment is left exactly as it was, part-way through its second year.
+    expect(state.character.education.enrolledIn).toBe('uni');
+    expect(state.character.education.year).toBe(2);
+  });
+
+  it('does not turn a schoolchild whose desk it healed into a dropout', () => {
+    /* Clearing the desk is the phase's reconciliation, not `dropOut`: no
+       `droppedOut` flag, so the ladder still owns the next rung. */
+    const drifted = makeRegistry([MIDDLE, HIGH, UNI, MED]); // primary school retired
+    const state = makeState({
+      age: 8,
+      education: { level: 'none', enrolledIn: 'ps', year: 2, gpa: 2.8, studyHard: false },
+    });
+
+    // Refused on the merits, not on a desk that no longer exists.
+    expect(applyToSchool(state, drifted, 'uni', 'cs')).toEqual({
+      ok: false,
+      reason: 'You need a high school diploma.',
+    });
+
+    const ed = state.character.education;
+    expect(ed.enrolledIn).toBeUndefined();
+    expect(ed.year).toBe(0);
+    expect(ed.level).toBe('none');
+    expect(state.character.flags.droppedOut).toBeUndefined();
+    expect(lastEntries(state)).toEqual([]);
+
+    state.character.age = 11;
+    educationPhase(makeCtx(state, drifted));
+    expect(state.character.education.enrolledIn).toBe('ms');
+  });
+});
+
+describe('applyToSchool from a cell', () => {
+  it('refuses a prisoner who would otherwise be admitted, and writes nothing', () => {
+    /* Every other "start something new" action refuses from a cell —
+       `jobRequirementsMet`, `emigrateTo`, `commitCrime` — and the More sheet
+       still reaches Education during a sentence. Without the gate this applicant
+       enrolled, and `advanceDegree` billed her the whole degree from custody:
+       four unaffordable years at $15,000 became $60,000 of student debt at 5%
+       APR, on a character `livingCosts` has already excused and who has no
+       income to service it. */
+    const state = makeState({
+      age: 19,
+      money: 0,
+      education: { level: 'high', year: 0, gpa: 3.4, studyHard: false },
+      prison: { crime: 'Burglary', yearsLeft: 8, totalYears: 8 },
+    });
+    const character = JSON.stringify(state.character);
+    const cursor = state.rngState;
+
+    expect(applyToSchool(state, makeRegistry(), 'uni', 'cs')).toEqual({
+      ok: false,
+      reason: "You're in prison.",
+    });
+
+    // A refusal is a no-op: no desk, no major, no feed line, no draw.
+    expect(JSON.stringify(state.character)).toBe(character);
+    expect(lastEntries(state)).toEqual([]);
+    expect(state.rngState).toBe(cursor);
+  });
+
+  it('leaves an enrolment that predates the sentence running', () => {
+    /* The other half of the content rule, and not what the gate is for: a
+       sentence keeps the enrolment record and `careerPhase` hands those years to
+       this phase. Only matriculating from a cell is refused. */
+    const state = makeState({
+      age: 20,
+      money: 100000,
+      education: {
+        level: 'high',
+        enrolledIn: 'uni',
+        major: 'cs',
+        year: 2,
+        gpa: 3.4,
+        studyHard: false,
+      },
+      prison: { crime: 'Burglary', yearsLeft: 3, totalYears: 4 },
+    });
+
+    educationPhase(makeCtx(state, makeRegistry()));
+
+    expect(state.character.education.enrolledIn).toBe('uni');
+    expect(state.character.education.year).toBe(3);
+    expect(state.character.money).toBe(85000);
   });
 });
 

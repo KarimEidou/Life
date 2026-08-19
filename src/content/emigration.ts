@@ -1,5 +1,4 @@
 import type {
-  Character,
   ContentPack,
   Ctx,
   Effect,
@@ -17,7 +16,8 @@ import type {
  * The visa roll itself belongs to the engine — `emigrateTo` charges the fee,
  * stamps `flags.lastVisaAge` and either moves the character or denies them — so
  * nothing here applies for anything. This pack is the flavour that hangs off
- * having gone, and every card is gated on `abroad`.
+ * having gone, and every card is gated on `abroad` — the renewal queue on the
+ * narrower `onAVisa`, since a naturalised citizen has nothing left to renew.
  *
  * That gate is deliberately not "has a visa stamp". `lastVisaAge` is written
  * whether the application was approved or refused, so a character who paid
@@ -26,42 +26,53 @@ import type {
  * logs on success, so `abroad` reads the log for that: a refusal leaves nothing
  * behind to find, and a legacy heir — whose log opens with a different sentence
  * and who inherits no stamp — is held to the same evidence as everyone else.
+ *
+ * That line also dates the arrival, so residence is counted from the year it was
+ * logged rather than from the stamp. A refused second application leaves a fresh
+ * stamp on a life that has not moved an inch, and must not restart the years.
  */
 
 /* ------------------------------------------------------------------ */
 /* Readers                                                             */
 /* ------------------------------------------------------------------ */
 
-/** The age the last visa was applied for, or nothing readable at all. */
-function visaAge(c: Character): number | undefined {
-  const raw = c.flags.lastVisaAge;
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return undefined;
-  return raw;
-}
-
-/** Years since that application; `Infinity` when there was never one. */
-function yearsSinceVisa(c: Character): number {
-  const applied = visaAge(c);
-  if (applied === undefined) return Infinity;
-  const since = c.age - applied;
-  return Number.isFinite(since) && since > 0 ? since : 0;
-}
-
 /** The line `emigrateTo` logs when a visa lands, and only then. */
 const MOVED_PREFIX = 'You moved to ';
 
-/** True once the engine has actually moved this life to another country. */
-function everMoved(state: GameState): boolean {
+/**
+ * The year of the latest approved move, or nothing when there has never been
+ * one. Searched newest first: the country a life is settling into is the one it
+ * arrived in last, not the one it left on the way.
+ */
+function arrivalYear(state: GameState): YearLog | undefined {
   /* Widened as in `alivePeople`: this walks a loaded save's whole log from
      inside an event condition, where a throw would strand a half-run year. */
   const years: (YearLog | undefined)[] = state.log;
-  for (const year of years) {
+  for (let i = years.length - 1; i >= 0; i -= 1) {
+    const year = years[i];
     for (const entry of year?.entries ?? []) {
       const text: unknown = entry?.text;
-      if (typeof text === 'string' && text.startsWith(MOVED_PREFIX)) return true;
+      if (typeof text === 'string' && text.startsWith(MOVED_PREFIX)) return year;
     }
   }
-  return false;
+  return undefined;
+}
+
+/** True once the engine has actually moved this life to another country. */
+function everMoved(state: GameState): boolean {
+  return arrivalYear(state) !== undefined;
+}
+
+/**
+ * Years lived where the life last landed; 0 in the year of the move itself, and
+ * `Infinity` when no move is datable, which reads as "long since settled" and
+ * so keeps the newly-arrived cards quiet.
+ */
+function yearsSettled(ctx: Ctx): number {
+  const arrived: unknown = arrivalYear(ctx.state)?.age;
+  if (typeof arrived !== 'number' || !Number.isFinite(arrived)) return Infinity;
+  const since = ctx.c.age - arrived;
+  return Number.isFinite(since) && since > 0 ? since : 0;
 }
 
 /** True once the life is being lived somewhere other than where it opened. */
@@ -83,9 +94,18 @@ function abroad(ctx: Ctx): boolean {
   return true;
 }
 
+/**
+ * Abroad on somebody else's paperwork. The ceremony is the storyline's terminal
+ * beat and sets `emigration:done` for good, so the residency admin has to read
+ * that flag rather than `abroad`, which the same flag pins open for life.
+ */
+function onAVisa(ctx: Ctx): boolean {
+  return abroad(ctx) && ctx.c.flags['emigration:done'] !== true;
+}
+
 /** Abroad, and still inside the first `n` years of it. */
 function settlingIn(n: number): (ctx: Ctx) => boolean {
-  return (ctx) => abroad(ctx) && yearsSinceVisa(ctx.c) <= n;
+  return (ctx) => abroad(ctx) && yearsSettled(ctx) <= n;
 }
 
 /** Everyone still alive. Widened first: a loaded save can hold a hole. */
@@ -199,7 +219,7 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 110,
     weight: 3,
-    condition: abroad,
+    condition: onAVisa,
     text: 'Renewal season. Another appointment, another stamp, another morning in a plastic chair.',
     effects: [
       { kind: 'money', delta: -400 },
@@ -288,7 +308,7 @@ const events: EventDef[] = [
     weight: 5,
     oncePerLife: true,
     // Five years of residence, then a small room, a flag and a photocopier.
-    condition: (ctx) => abroad(ctx) && yearsSinceVisa(ctx.c) >= 5,
+    condition: (ctx) => abroad(ctx) && yearsSettled(ctx) >= 5,
     text: 'You swore an oath in a municipal room in {country} and got a passport out of it.',
     effects: [
       markCitizen,

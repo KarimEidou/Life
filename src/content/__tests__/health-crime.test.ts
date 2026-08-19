@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { crimePack } from '@/content/crime';
 import { healthPack } from '@/content/health';
 import { applyEffects } from '@/engine/effects';
+import { availableInteractions, runInteraction } from '@/engine/interactions';
 import { eventsPhase } from '@/engine/phases/events';
 import { healthPhase } from '@/engine/phases/health';
 import { buildRegistry } from '@/engine/registry';
@@ -15,6 +16,7 @@ import type {
   GameState,
   IllnessDef,
   Person,
+  PrisonState,
   RelKind,
   Rng,
 } from '@/types';
@@ -119,6 +121,174 @@ describe('health pack recovery', () => {
       { defId: 'ill-migraine', years: 2, treated: false },
     ]);
     expect(entries.every((entry) => entry.icon !== '💚')).toBe(true);
+  });
+});
+
+/**
+ * Health pack: the rows that need the world outside sit out prison years.
+ *
+ * `eventsPhase` keeps drawing while the character is inside and the Health
+ * sheet stays reachable from More, so anything this pack leaves ungated is
+ * handed out from a cell: a church-hall clinic that treats a $50,000 condition
+ * for nothing, a $30 pharmacy queue, and a $6,000 thirty-day residential stay.
+ */
+
+/** Rows that need the world outside; none of them may reach a cell. */
+const OUTSIDE_EVENTS = [
+  'ev-health-gym-injury',
+  'ev-health-scare',
+  'ev-health-free-clinic',
+  'ev-health-dentist',
+  'ev-health-flu-shot',
+];
+
+/** Bouts a cell delivers as readily as a house does; these stay ungated. */
+const INSIDE_EVENTS = [
+  'ev-health-flu-season',
+  'ev-health-insomnia',
+  'ev-health-allergies',
+  'ev-health-back-tweak',
+];
+
+/** The four residential stays, by id. */
+const REHAB_ROWS = [
+  'act-rehab-alcohol',
+  'act-rehab-drugs',
+  'act-rehab-gambling',
+  'act-rehab-smoking',
+];
+
+/** Care an infirmary can plausibly manage: the whole health sheet, inside. */
+const INSIDE_ROWS = ['act-checkup', 'act-doctor', 'act-meditation', 'act-therapy'];
+
+const CLINIC_TEXT =
+  'A free clinic set up in the church hall. You got a shot, a lollipop and a clean bill of health.';
+
+const HEALTH = buildRegistry([healthPack]);
+
+const SENTENCE: PrisonState = { crime: 'Burglary', yearsLeft: 6, totalYears: 6 };
+
+function healthEventOf(id: string): EventDef {
+  const def = (healthPack.events ?? []).find((candidate) => candidate.id === id);
+  if (!def) throw new Error(`health ships no "${id}"`);
+  return def;
+}
+
+/**
+ * Forty-eight, a gym habit and four things to quit, so every row under test
+ * clears its age window and its other clauses: the cell is the only difference.
+ */
+function patient(prison: PrisonState | null): GameState {
+  const state = createLife(EMPTY, { seed: 3, firstName: 'Ada', lastName: 'Moreno' });
+  const c = state.character;
+  c.age = 48;
+  c.prison = prison;
+  c.flags.gymRegular = true;
+  c.addictions = { alcohol: 60, smoking: 60, gambling: 60, drugs: 60 };
+  return state;
+}
+
+describe('health pack prison gate', () => {
+  it('refuses every outside-world event to a character serving a sentence', () => {
+    for (const id of OUTSIDE_EVENTS) {
+      const def = healthEventOf(id);
+
+      expect(def.condition?.(ctxOf(patient(SENTENCE), HEALTH)), id).toBe(false);
+      // Not vacuous: the same character, released, is eligible for all five.
+      expect(def.condition?.(ctxOf(patient(null), HEALTH)), id).toBe(true);
+    }
+  });
+
+  it('draws none of them, and no randomness, during a prison year', () => {
+    const reg = buildRegistry([
+      { id: 'health-outside-only', events: OUTSIDE_EVENTS.map(healthEventOf) },
+    ]);
+    const inside = patient(SENTENCE);
+    const before = inside.rngState;
+
+    expect(eventsPhase(ctxOf(inside, reg))).toEqual([]);
+    // The pool is emptied before the year's first roll, so the year costs nothing.
+    expect(inside.rngState).toBe(before);
+  });
+
+  it('still runs the clinic for a character who is not inside', () => {
+    const reg = buildRegistry([
+      { id: 'health-clinic-only', events: [healthEventOf('ev-health-free-clinic')] },
+    ]);
+
+    const entries = eventsPhase(ctxOf(patient(null), reg, alwaysDraws()));
+
+    expect(entries[0]?.text).toBe(CLINIC_TEXT);
+  });
+
+  it('offers the infirmary rows from a cell and the rehab rows only outside', () => {
+    const listed = availableInteractions(patient(SENTENCE), HEALTH, 'health').map((def) => def.id);
+
+    expect(listed.sort()).toEqual(INSIDE_ROWS);
+
+    // Not vacuous: the same four addictions buy four rehab rows on the outside.
+    const outside = availableInteractions(patient(null), HEALTH, 'health').map((def) => def.id);
+    expect(outside.sort()).toEqual([...INSIDE_ROWS, ...REHAB_ROWS].sort());
+  });
+
+  it('keeps the bouts a cell can still deliver', () => {
+    const inside = patient(SENTENCE);
+
+    for (const id of INSIDE_EVENTS) {
+      expect(healthEventOf(id).condition?.(ctxOf(inside, HEALTH)) !== false, id).toBe(true);
+    }
+  });
+});
+
+/**
+ * Health pack: the care rows that need an age of their own.
+ *
+ * `canUse` falls back to `def.minAge ?? 0`, so a row shipped without one is
+ * offered from birth. `act-meditation` is free and carries no cooldown, so
+ * ungated it put an unlimited +3 happiness in front of a newborn: a dozen taps
+ * from the rolled start to 100, before the first Age Up. The activities pack
+ * gates its own `act-meditate` at the same age for the same reason.
+ */
+
+/** Old enough to sit still on purpose; the gate `act-meditate` also carries. */
+const MEDITATION_MIN_AGE = 8;
+
+/** Health rows that need no age of their own: all a newborn may be offered. */
+const INFANT_ROWS = ['act-checkup', 'act-doctor'];
+
+/** A well character of the given age: nothing to quit, so only the age can gate. */
+function aged(age: number): GameState {
+  const state = createLife(EMPTY, { seed: 11, firstName: 'Ada', lastName: 'Moreno' });
+  state.character.age = age;
+  // Room under the cap, so a +3 that lands is a +3 the assertion can see.
+  state.character.stats.happiness = 50;
+  return state;
+}
+
+describe('health pack age gates', () => {
+  it('offers a newborn only the rows that carry no age of their own', () => {
+    const listed = availableInteractions(aged(0), HEALTH, 'health').map((def) => def.id);
+
+    expect(listed.sort()).toEqual(INFANT_ROWS);
+
+    // Not vacuous: the sheet lists meditation the year the character is old enough.
+    const older = availableInteractions(aged(MEDITATION_MIN_AGE), HEALTH, 'health');
+    expect(older.map((def) => def.id)).toContain('act-meditation');
+  });
+
+  it('refuses a child the free, cooldown-free happiness of meditation', () => {
+    const state = aged(MEDITATION_MIN_AGE - 1);
+    const before = state.rngState;
+
+    expect(runInteraction(state, HEALTH, 'act-meditation')?.text).toBe("You're too young.");
+    expect(state.character.stats.happiness).toBe(50);
+    // A refusal costs nothing, a draw included.
+    expect(state.rngState).toBe(before);
+
+    // Not vacuous: a year older, the same tap lands its +3.
+    const older = aged(MEDITATION_MIN_AGE);
+    expect(runInteraction(older, HEALTH, 'act-meditation')?.entries.length).toBeGreaterThan(0);
+    expect(older.character.stats.happiness).toBe(53);
   });
 });
 

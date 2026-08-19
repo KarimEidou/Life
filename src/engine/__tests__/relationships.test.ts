@@ -220,18 +220,46 @@ describe('who gets rolled for death', () => {
         (state) => !only(state).alive
       );
 
-    expect(deaths(41)).toBe(0);
-    expect(deaths(199)).toBeGreaterThan(150);
+    // 0.2% a year at 42 against 16% at 91: 200 cursors barely reach the first.
+    expect(deaths(41)).toBeLessThan(5);
+    expect(deaths(90)).toBeGreaterThan(20);
+    // Nobody outlives the backstop: the year that carries them to 110 is certain.
+    expect(deaths(109)).toBe(200);
+  });
+
+  /* The curve is the same calibration as the character's in `deathCheck.ts`, so
+     a cohort of it has to land where a cohort of lives does. At a tenth of the
+     base the median sat at 106 and 63% of parents were still alive at 100. */
+  it('takes a cohort of parents at human ages', () => {
+    const ageAtDeath = (cursor: number): number => {
+      const state = personState(cursor, { kind: 'mother', name: 'Eve Byron', age: 40 });
+      state.rngState = initialRngState(cursor);
+      const mother = only(state);
+      for (let year = 0; year < 100 && mother.alive; year += 1) {
+        relationshipsPhase(ctxFor(state));
+      }
+      return mother.age;
+    };
+
+    const ages: number[] = [];
+    for (let cursor = 1; cursor <= 100; cursor += 1) ages.push(ageAtDeath(cursor));
+    const sorted = [...ages].sort((a, b) => a - b);
+
+    // Measured: median 78, mean 77.0, oldest 102, one life of the hundred past 100.
+    expect(sorted[50]).toBeGreaterThanOrEqual(70);
+    expect(sorted[50]).toBeLessThanOrEqual(88);
+    expect(Math.max(...ages)).toBeLessThanOrEqual(110);
+    expect(ages.filter((age) => age > 100).length).toBeLessThan(10);
   });
 
   it('buries a parent with a line and a dent in happiness', () => {
     const { state, entries } = forceBranch(
-      () => personState(6, { kind: 'mother', name: 'Eve Byron', age: 199 }),
+      () => personState(6, { kind: 'mother', name: 'Eve Byron', age: 89 }),
       (s) => !only(s).alive
     );
 
     expect(entries).toEqual([
-      { icon: '🖤', kind: 'bad', text: 'Your mother Eve Byron died at 200.' },
+      { icon: '🖤', kind: 'bad', text: 'Your mother Eve Byron died at 90.' },
     ]);
     expect(state.character.stats.happiness).toBe(48);
     expect(only(state).rel).toBe(50);
@@ -239,11 +267,11 @@ describe('who gets rolled for death', () => {
 
   it('hurts more when it is a spouse', () => {
     const { state, entries } = forceBranch(
-      () => personState(7, { kind: 'spouse', age: 199 }),
+      () => personState(7, { kind: 'spouse', age: 89 }),
       (s) => !only(s).alive
     );
 
-    expect(texts(entries)).toEqual(['Your spouse Sam Byron died at 200.']);
+    expect(texts(entries)).toEqual(['Your spouse Sam Byron died at 90.']);
     expect(state.character.stats.happiness).toBe(42);
   });
 
@@ -283,6 +311,26 @@ describe('affinity drift', () => {
       relationshipsPhase(ctxFor(state));
       expect(only(state).rel).toBe(after);
     }
+  });
+
+  it('holds the 0..100, one-decimal shape of an affinity it fades', () => {
+    // A romance leaves fractional affinity behind, and `rollSplit` then hands the
+    // person to this branch as an `ex`: 49.2 must fade to 47.2, not to
+    // 47.199999999999996 in the save.
+    const state = personState(29, { kind: 'ex', rel: 49.2 });
+    relationshipsPhase(ctxFor(state));
+    expect(only(state).rel).toBe(47.2);
+    relationshipsPhase(ctxFor(state));
+    expect(only(state).rel).toBe(45.2);
+
+    const nearly = personState(30, { kind: 'friend', rel: 2.1 });
+    relationshipsPhase(ctxFor(nearly));
+    expect(only(nearly).rel).toBe(0.1);
+
+    // A save that drifted outside the range is pulled back inside it, not just down two.
+    const stray = personState(31, { kind: 'friend', rel: 150 });
+    relationshipsPhase(ctxFor(stray));
+    expect(only(stray).rel).toBe(100);
   });
 
   it("moves a romance with the character's mood", () => {

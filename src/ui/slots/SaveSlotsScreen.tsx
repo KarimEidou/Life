@@ -24,7 +24,14 @@ const bodyStyle: CSSProperties = {
 
 /** Occupied-slot caption: age, generation, bankroll and whether the life ended. */
 function summarySubtitle(s: SlotSummary): string {
-  const base = `Age ${String(s.age ?? 0)} · Gen ${String(s.generation ?? 1)} · ${fmtMoneyCompact(s.money ?? 0)}`;
+  if (s.age === undefined) {
+    /* The summariser fills the details together or not at all, so a row without
+       them is a save it could not read — a newer build's, or a damaged one.
+       `Age 0 · Gen 1 · $0` would describe a life that is not in there; Continue
+       reports which of the two it is. */
+    return 'This save could not be read';
+  }
+  const base = `Age ${String(s.age)} · Gen ${String(s.generation ?? 1)} · ${fmtMoneyCompact(s.money ?? 0)}`;
   return s.dead === true ? `${base} · Deceased` : base;
 }
 

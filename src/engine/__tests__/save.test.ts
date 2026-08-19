@@ -334,6 +334,29 @@ describe('migrations', () => {
       delete migrations[SAVE_VERSION];
     }
   });
+
+  it('shape-gates what the chain produced, not what was stored', () => {
+    /* The other half of moving the gate behind the chain: a step that *breaks* a
+       shape must not ride that move into an `ok` verdict, which would hand the
+       screens a payload no boundary ever checked. */
+    const storage = memoryStorage();
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION - 1, savedAt: 1, slot: 1, state: fixture('Ada') })
+    );
+
+    migrations[SAVE_VERSION] = (old: unknown): unknown => {
+      const next = { ...(old as Record<string, unknown>) };
+      delete next.people;
+      return next;
+    };
+
+    try {
+      expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'corrupt' });
+    } finally {
+      delete migrations[SAVE_VERSION];
+    }
+  });
 });
 
 describe('deleteSave', () => {
@@ -454,14 +477,75 @@ describe('listSlots', () => {
     expect(listSlots(storage).find((s) => s.slot === 1)?.name).toBe('Ada');
   });
 
-  it('treats an unreadable slot as empty instead of throwing', () => {
+  it('keeps a slot it cannot read occupied instead of throwing or offering it', () => {
+    /* `empty` has to mean what `loadGame` means by it — nothing is stored —
+       because the load menu hands an empty row straight to the create screen,
+       which overwrites the slot with no confirmation and no undo. Every payload
+       below is one `loadGame` calls `corrupt`: data that is there, however
+       damaged, and the player's to delete rather than the game's to discard. */
     const storage = memoryStorage();
     const target = listSlots(storage)[0].slot;
-    storage.setItem(`ol.save.${target}`, 'not json at all');
-    expect(listSlots(storage).find((s) => s.slot === target)?.empty).toBe(true);
+    const key = `ol.save.${String(target)}`;
+    const payloads = [
+      'not json at all',
+      '{"version":1,"state":',
+      'null',
+      JSON.stringify([1, 2, 3]),
+      JSON.stringify({ version: SAVE_VERSION, savedAt: 5, slot: target, state: 7 }),
+      JSON.stringify({ version: SAVE_VERSION, savedAt: 5, slot: target, state: { hero: {} } }),
+      JSON.stringify({ version: SAVE_VERSION, savedAt: 5, slot: target }),
+    ];
 
-    storage.setItem(`ol.save.${target}`, JSON.stringify({ version: 1, state: 7 }));
+    for (const raw of payloads) {
+      storage.setItem(key, raw);
+      expect(loadGame(storage, target), raw).toEqual({ ok: false, reason: 'corrupt' });
+      const summary = listSlots(storage).find((s) => s.slot === target);
+      expect(summary?.empty, raw).toBe(false);
+      /* Nothing was read out of the payload, so the row has no life to describe:
+         the load menu reads the missing details as "could not be read" rather
+         than captioning the slot `Age 0 · Gen 1 · $0`. */
+      expect(summary?.name, raw).toBeUndefined();
+      expect(summary?.age, raw).toBeUndefined();
+      expect(summary?.generation, raw).toBeUndefined();
+    }
+
+    // Only a slot nothing was ever written to is free to start a life in.
+    storage.setItem(key, '');
     expect(listSlots(storage).find((s) => s.slot === target)?.empty).toBe(true);
+    deleteSave(storage, target);
+    expect(listSlots(storage).find((s) => s.slot === target)?.empty).toBe(true);
+  });
+
+  it('never offers a slot only a migration can read as empty', () => {
+    /* The expensive half of that disagreement: `loadGame` runs the migration
+       chain before the shape gate, so a legacy envelope can be perfectly
+       loadable while the shallow summary finds no `character` at all. Reported
+       empty, one tap on the row starts a new life over a healthy save. */
+    const storage = memoryStorage();
+    const modern = fixture('Ada');
+    const legacy: Record<string, unknown> = { ...modern };
+    delete legacy.character;
+    legacy.hero = modern.character;
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION - 1, savedAt: 9, slot: 1, state: legacy })
+    );
+
+    migrations[SAVE_VERSION] = (old: unknown): unknown => {
+      const { hero, ...rest } = old as Record<string, unknown>;
+      return { ...rest, character: hero };
+    };
+
+    try {
+      expect(loadGame(storage, 1).ok).toBe(true);
+      expect(listSlots(storage).find((s) => s.slot === 1)).toEqual({
+        slot: 1,
+        empty: false,
+        savedAt: 9,
+      });
+    } finally {
+      delete migrations[SAVE_VERSION];
+    }
   });
 });
 

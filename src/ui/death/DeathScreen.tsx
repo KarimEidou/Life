@@ -80,7 +80,18 @@ export function DeathScreen(): ReactElement {
     useGameStore.getState().abandonLife();
   };
 
-  if (game === null || game.death === undefined) {
+  /* The load-time shape gate (`isGameStateShaped`, engine/save.ts) certifies the
+     containers the UI walks — `character`, `people`, `log`, `ancestors` — but
+     nothing inside the obituary, so a drifted save can reach this screen with a
+     cause and no epitaph stats; with no error boundary above the screens,
+     reading through them blanks the whole app. Truthy rather than
+     `!== undefined`: a round-tripped stats block can come back null too. An
+     obituary with nothing to quote is the same nothing-to-show case as no
+     `death`, and that branch keeps the way back to the menu. */
+  const death = game?.death;
+  const stats = death?.epitaphStats;
+
+  if (game === null || death === undefined || !stats) {
     return (
       <div data-testid="screen-death" style={rootStyle}>
         <div style={columnStyle}>
@@ -93,11 +104,10 @@ export function DeathScreen(): ReactElement {
     );
   }
 
-  const death = game.death;
   const statRows: { label: string; value: ReactNode }[] = [
-    { label: 'Net worth', value: <MoneyText value={death.epitaphStats.netWorth} /> },
-    { label: 'Jobs held', value: String(death.epitaphStats.jobsHeld) },
-    { label: 'Children', value: String(death.epitaphStats.kids) },
+    { label: 'Net worth', value: <MoneyText value={stats.netWorth} /> },
+    { label: 'Jobs held', value: String(stats.jobsHeld) },
+    { label: 'Children', value: String(stats.kids) },
     { label: 'Generation', value: String(game.generation) },
   ];
   const hasHeirs = aliveChildren(game).length > 0;

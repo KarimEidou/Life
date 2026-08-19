@@ -1,4 +1,6 @@
-import type { CSSProperties, ReactElement } from 'react';
+import { createContext, useContext, useState } from 'react';
+import type { CSSProperties, ReactElement, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 interface AlertProps {
   open: boolean;
@@ -12,6 +14,18 @@ interface AlertProps {
   }[];
 }
 
+/** The shell-wide layer alerts render into; `null` when no host is mounted. */
+const OverlayContext = createContext<HTMLElement | null>(null);
+
+const hostStyle: CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  zIndex: 30,
+  /* The layer spans the shell even while empty, so it must never hit-test
+     itself; the scrim opts back in. */
+  pointerEvents: 'none',
+};
+
 const overlayStyle: CSSProperties = {
   position: 'absolute',
   inset: 0,
@@ -21,6 +35,7 @@ const overlayStyle: CSSProperties = {
   padding: 'var(--sp-5)',
   background: 'rgba(0, 0, 0, 0.3)',
   zIndex: 30,
+  pointerEvents: 'auto',
 };
 
 const panelStyle: CSSProperties = {
@@ -32,12 +47,30 @@ const panelStyle: CSSProperties = {
   textAlign: 'center',
 };
 
+/**
+ * Wraps the app shell and owns the layer every `Alert` below it renders into.
+ * Without it an alert's scrim resolves against its nearest positioned
+ * ancestor, which inside a `Sheet` is the sheet panel: it would dim the panel
+ * alone, sit inside the sheet's scroller so the list moved behind the dialog,
+ * and leave the sheet's own dismiss backdrop live in the strip above it.
+ */
+export function AlertHost({ children }: { children: ReactNode }): ReactElement {
+  const [layer, setLayer] = useState<HTMLDivElement | null>(null);
+  return (
+    <OverlayContext.Provider value={layer}>
+      {children}
+      <div ref={setLayer} style={hostStyle} />
+    </OverlayContext.Provider>
+  );
+}
+
 /** The centred iOS confirmation dialog. Renders nothing while closed. */
 export function Alert({ open, title, message, actions }: AlertProps): ReactElement | null {
+  const layer = useContext(OverlayContext);
   if (!open) {
     return null;
   }
-  return (
+  const dialog = (
     <div style={overlayStyle}>
       <div style={panelStyle}>
         <div style={{ fontWeight: 600 }}>{title}</div>
@@ -65,4 +98,8 @@ export function Alert({ open, title, message, actions }: AlertProps): ReactEleme
       </div>
     </div>
   );
+  /* Outside a host — or on the first commit, before its ref lands — the alert
+     still renders in place, as it always did. Either way React events keep
+     bubbling to the call site, not to the layer. */
+  return layer === null ? dialog : createPortal(dialog, layer);
 }

@@ -1,0 +1,14 @@
+{
+  // Second program for the code outside `src`, which `tsconfig.json` does not
+  // include. Playwright compiles `e2e/` with esbuild, which strips types
+  // without checking them, so nothing else typechecks these files.
+  // `scripts/*.mjs` and the root `*.config.ts` files import node builtins and
+  // read `process`; they can only join this program once @types/node is a
+  // devDependency.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["e2e"]
+}

@@ -9,6 +9,11 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "isolatedModules": true,
+    // Vite owns the build; tsc only typechecks. Without this a bare `tsc -p .`
+    // emits a sibling `.js` for every source in place, and Vite's default
+    // `resolve.extensions` tries `.js` before `.ts`, so those stale snapshots
+    // would shadow the sources they were emitted from.
+    "noEmit": true,
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": false,

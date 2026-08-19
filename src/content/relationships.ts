@@ -1,3 +1,4 @@
+import { clampMoney } from '@/engine/effects';
 import { addPerson } from '@/engine/state';
 import type {
   ContentPack,
@@ -209,10 +210,19 @@ function poolFor(ctx: RollCtx): NamePool | undefined {
   return pools[ctx.state.character.countryId];
 }
 
-/** A plausible local given name, or a neutral stand-in when no pool is loaded. */
-function rollFirstName(ctx: RollCtx, gender: Gender): string {
+/**
+ * A plausible local given name, or a neutral stand-in when no pool is loaded.
+ *
+ * `taken` drops a name already spoken for by a sibling minted in the same
+ * breath, so twins under one surname cannot answer to the same name. It costs
+ * no extra draw — the pick is still exactly one, whatever the list ends up
+ * holding — and a name this pool never held filters nothing out, so a birth
+ * that could not have collided rolls exactly as it did before.
+ */
+function rollFirstName(ctx: RollCtx, gender: Gender, taken?: string): string {
   const pool = poolFor(ctx);
-  const given = gender === 'female' ? pool?.female : pool?.male;
+  const all = gender === 'female' ? pool?.female : pool?.male;
+  const given = taken === undefined ? all : all?.filter((name) => name !== taken);
   if (given && given.length > 0) return ctx.rng.pick(given);
   return gender === 'female' ? 'Riley' : 'Alex';
 }
@@ -286,6 +296,9 @@ const DATE_NIGHTS: readonly string[] = [
 /* ------------------------------------------------------------------ */
 /* Interactions                                                        */
 /* ------------------------------------------------------------------ */
+
+/** Share of the cash a settlement leaves behind; its log line quotes the rest. */
+const DIVORCE_KEEP = 0.6;
 
 const interactions: InteractionDef[] = [
   {
@@ -442,6 +455,11 @@ const interactions: InteractionDef[] = [
     area: 'relationship',
     label: 'Ask for Money',
     icon: '🤲',
+    /* The asker's gate; the condition below is the giver's. Without one a
+       newborn banks $200-2000 a year off the parents `createLife` mints above
+       the payout threshold — 6 is where the rest of the childhood money
+       content starts, and where a character can hold the conversation. */
+    minAge: 6,
     cooldownYears: 1,
     condition: needs(PEOPLE, (p) => p.age >= 16),
     resolve: (ctx: Ctx) => {
@@ -569,10 +587,12 @@ const interactions: InteractionDef[] = [
       }
       const surname = ctx.c.lastName;
       const genderA = ctx.rng.pick(ROLLED_GENDERS);
-      const nameA = `${rollFirstName(ctx, genderA)} ${surname}`.trim();
+      const givenA = rollFirstName(ctx, genderA);
+      const nameA = `${givenA} ${surname}`.trim();
       if (ctx.rng.chance(0.05)) {
         const genderB = ctx.rng.pick(ROLLED_GENDERS);
-        const nameB = `${rollFirstName(ctx, genderB)} ${surname}`.trim();
+        // Both twins take the character's surname, so the given names must differ.
+        const nameB = `${rollFirstName(ctx, genderB, givenA)} ${surname}`.trim();
         return {
           text: `Twins. Meet ${nameA} and ${nameB}. Nobody is sleeping again.`,
           effects: [
@@ -654,8 +674,11 @@ const interactions: InteractionDef[] = [
             kind: 'fn',
             run: (ec: EffectCtx) => {
               const c = ec.state.character;
-              if (!Number.isFinite(c.money)) return;
-              c.money = Math.max(0, Math.round(c.money * 0.6));
+              /* A share of the balance, so no `{kind:'money'}` delta fits — but
+                 the write still goes through `clampMoney`, which owns the
+                 unreadable case: a balance that came back poisoned heals to 0
+                 here instead of surviving the settlement untouched. */
+              c.money = clampMoney(c.money * DIVORCE_KEEP, c.money);
             },
           },
           { kind: 'stat', stat: 'happiness', delta: -15 },
@@ -1032,7 +1055,7 @@ const events: EventDef[] = [
     minAge: 8,
     maxAge: 110,
     weight: 3,
-    condition: (ctx: Ctx) => bestFriend(ctx.state) !== undefined,
+    condition: (ctx: Ctx) => free(ctx) && bestFriend(ctx.state) !== undefined,
     text: (ctx: Ctx) => {
       const friend = bestFriend(ctx.state);
       const first = friend ? firstNameOf(friend, 'Your best friend') : 'Your best friend';
@@ -1050,7 +1073,7 @@ const events: EventDef[] = [
     minAge: 12,
     maxAge: 110,
     weight: 4,
-    condition: (ctx: Ctx) => bestFriend(ctx.state) !== undefined,
+    condition: (ctx: Ctx) => free(ctx) && bestFriend(ctx.state) !== undefined,
     text: (ctx: Ctx) => {
       const friend = bestFriend(ctx.state);
       const first = friend ? firstNameOf(friend, 'A friend') : 'A friend';
@@ -1169,7 +1192,7 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 90,
     weight: 5,
-    condition: (ctx: Ctx) => childAged(ctx.state, 0, 2) !== undefined,
+    condition: (ctx: Ctx) => free(ctx) && childAged(ctx.state, 0, 2) !== undefined,
     text: (ctx: Ctx) => {
       const child = childAged(ctx.state, 0, 2);
       const first = child ? firstNameOf(child, 'Your baby') : 'Your baby';
@@ -1187,7 +1210,7 @@ const events: EventDef[] = [
     minAge: 30,
     maxAge: 100,
     weight: 4,
-    condition: (ctx: Ctx) => childAged(ctx.state, 17, 19) !== undefined,
+    condition: (ctx: Ctx) => free(ctx) && childAged(ctx.state, 17, 19) !== undefined,
     text: (ctx: Ctx) => {
       const child = childAged(ctx.state, 17, 19);
       const first = child ? firstNameOf(child, 'Your child') : 'Your child';
@@ -1206,7 +1229,7 @@ const events: EventDef[] = [
     minAge: 8,
     maxAge: 110,
     weight: 3,
-    condition: (ctx: Ctx) => firstOfKind(ctx.state, 'sibling') !== undefined,
+    condition: (ctx: Ctx) => free(ctx) && firstOfKind(ctx.state, 'sibling') !== undefined,
     text: (ctx: Ctx) => {
       const sibling = firstOfKind(ctx.state, 'sibling');
       const first = sibling ? firstNameOf(sibling, 'Your sibling') : 'Your sibling';
@@ -1270,7 +1293,7 @@ const events: EventDef[] = [
     minAge: 5,
     maxAge: 110,
     weight: 4,
-    condition: (ctx: Ctx) => firstOfKind(ctx.state, 'pet') !== undefined,
+    condition: (ctx: Ctx) => free(ctx) && firstOfKind(ctx.state, 'pet') !== undefined,
     text: (ctx: Ctx) => {
       const pet = firstOfKind(ctx.state, 'pet');
       const first = pet ? firstNameOf(pet, 'Your pet') : 'Your pet';

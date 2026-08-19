@@ -19,7 +19,14 @@ const AGE_EXPONENT = 0.088;
 /** Nothing short of extreme age is ever certain. */
 const MAX_HAZARD = 0.95;
 
+/**
+ * Always answers inside the bounds, NaN included — every comparison against NaN
+ * is false, so the bare ternary handed it back untouched. An unreadable hazard
+ * is not a merely wrong one: `rng.chance(NaN)` is `false`, so it is a character
+ * who cannot die of anything until the 110 backstop.
+ */
 function clamp(n: number, min: number, max: number): number {
+  if (Number.isNaN(n)) return min;
   return n < min ? min : n > max ? max : n;
 }
 
@@ -40,14 +47,20 @@ export function deathProbability(ctx: Ctx): number {
 
   for (const illness of c.illnesses) {
     const def = findIllness(ctx, illness.defId);
-    if (!def) continue;
+    /* `lethality` is hand-authored and `validateRegistry` names a bad one but
+       never runs at load time, so it arrives here unchecked. Dropped rather
+       than summed — the reading `rng.weighted` and `isEligible` already give a
+       non-finite weight: an unreadable number is not a very large one. */
+    if (!def || !Number.isFinite(def.lethality)) continue;
     q += def.lethality * (illness.treated ? 0.5 : 2);
   }
 
   const addictions = c.addictions as Record<string, number | undefined>;
   for (const key of Object.keys(addictions)) {
     const severity = addictions[key];
-    if (typeof severity !== 'number' || severity <= 0) continue;
+    /* Widened, so the key may hold anything a drifted save carried, and
+       `NaN <= 0` is false: the gate has to test readability itself. */
+    if (typeof severity !== 'number' || !(Number.isFinite(severity) && severity > 0)) continue;
     q += (severity / 100) * 0.01 * (key === 'drugs' ? 3 : 1);
   }
 
@@ -65,7 +78,10 @@ function causeOfDeath(ctx: Ctx): string {
   for (const illness of c.illnesses) {
     if (illness.treated) continue;
     const def = findIllness(ctx, illness.defId);
-    if (!def) continue;
+    /* Same skip as the hazard sum, for a second reason: `0.25 > NaN` is false,
+       so an unreadable def adopted as `worst` could never be displaced and
+       took the obituary from the illness that actually did the killing. */
+    if (!def || !Number.isFinite(def.lethality)) continue;
     if (!worst || def.lethality > worst.lethality) worst = def;
   }
   if (worst) return worst.label;
