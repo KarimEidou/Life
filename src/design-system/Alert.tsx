@@ -4,7 +4,12 @@ interface AlertProps {
   open: boolean;
   title: string;
   message?: string;
-  actions: { label: string; style?: 'default' | 'cancel' | 'destructive'; onPress: () => void }[];
+  actions: {
+    label: string;
+    style?: 'default' | 'cancel' | 'destructive';
+    onPress: () => void;
+    testId?: string;
+  }[];
 }
 
 const overlayStyle: CSSProperties = {
@@ -44,6 +49,7 @@ export function Alert({ open, title, message, actions }: AlertProps): ReactEleme
             <button
               key={action.label}
               type="button"
+              data-testid={action.testId}
               onClick={action.onPress}
               style={{
                 padding: 'var(--sp-2)',

@@ -26,6 +26,7 @@ export function ProgressBar({ value, color, height, animated }: ProgressBarProps
           width: `${pct}%`,
           height: '100%',
           background: color ?? 'var(--c-blue)',
+          transition: animated !== false ? 'width var(--t-med) var(--ease-out)' : undefined,
         }}
       />
     </div>

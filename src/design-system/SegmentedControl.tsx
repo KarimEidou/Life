@@ -1,7 +1,7 @@
 import type { CSSProperties, ReactElement } from 'react';
 
 interface SegmentedControlProps {
-  options: { id: string; label: string }[];
+  options: { id: string; label: string; testId?: string }[];
   value: string;
   onChange: (id: string) => void;
 }
@@ -22,6 +22,7 @@ export function SegmentedControl({ options, value, onChange }: SegmentedControlP
         <button
           key={option.id}
           type="button"
+          data-testid={option.testId}
           onClick={() => onChange(option.id)}
           style={{
             flex: 1,

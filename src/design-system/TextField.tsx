@@ -6,6 +6,7 @@ interface TextFieldProps {
   placeholder?: string;
   maxLength?: number;
   label?: string;
+  testId?: string;
 }
 
 const inputStyle: CSSProperties = {
@@ -23,6 +24,7 @@ export function TextField({
   placeholder,
   maxLength,
   label,
+  testId,
 }: TextFieldProps): ReactElement {
   return (
     <label style={{ display: 'block' }}>
@@ -40,6 +42,7 @@ export function TextField({
       ) : null}
       <input
         type="text"
+        data-testid={testId}
         value={value}
         placeholder={placeholder}
         maxLength={maxLength}
