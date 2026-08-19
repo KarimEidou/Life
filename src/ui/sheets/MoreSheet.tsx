@@ -78,6 +78,51 @@ export function MoreSheet(): ReactElement | null {
     <SheetChrome id="more" title="More">
       <Card>
         <ListRow
+          icon="🎓"
+          title="Education"
+          chevron
+          testId="more-education"
+          onClick={() => {
+            useUiStore.getState().pushSheet('education');
+          }}
+        />
+        <ListRow
+          icon="💰"
+          title="Money"
+          chevron
+          testId="more-finance"
+          onClick={() => {
+            useUiStore.getState().pushSheet('finance');
+          }}
+        />
+        <ListRow
+          icon="🏥"
+          title="Health"
+          chevron
+          testId="more-health"
+          onClick={() => {
+            useUiStore.getState().pushSheet('health');
+          }}
+        />
+        <ListRow
+          icon="🚔"
+          title="Crime"
+          chevron
+          testId="more-crime"
+          onClick={() => {
+            useUiStore.getState().pushSheet('crime');
+          }}
+        />
+        <ListRow
+          icon="🎰"
+          title="Casino"
+          chevron
+          testId="more-casino"
+          onClick={() => {
+            useUiStore.getState().pushSheet('casino');
+          }}
+        />
+        <ListRow
           icon="🏆"
           title="Achievements"
           chevron
