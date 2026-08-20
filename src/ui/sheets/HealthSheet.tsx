@@ -7,6 +7,7 @@ import { availableInteractions } from '@/engine/interactions';
 import { useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
 import type { IllnessDef } from '@/types';
+import { HEALTH_AREA } from '@/ui/lib/areas';
 import { gateFor, statColor } from '@/ui/lib/feed';
 import { SheetChrome } from '@/ui/sheets/SheetChrome';
 
@@ -47,7 +48,7 @@ export function HealthSheet(): ReactElement | null {
 
   const c = game.character;
   const reg = getRegistry();
-  const actions = availableInteractions(game, reg, 'health');
+  const actions = availableInteractions(game, reg, HEALTH_AREA);
   const addictions = Object.entries(c.addictions).filter(
     (entry): entry is [string, number] => typeof entry[1] === 'number'
   );

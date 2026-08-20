@@ -9,11 +9,11 @@ import type {
   YearLog,
 } from '@/types';
 
-/* `ageUp` is another agent's module and still a stub while the engine wave runs
-   in parallel, so this suite supplies the documented stand-in: the last year log,
-   created for the current age when the log is empty. `rng` and `effects` have
-   landed, so the real ones are used. */
-vi.mock('@/engine/ageUp', () => ({
+/* Stands in for the one helper `state` logs through, so this suite pins the
+   contract it depends on rather than the log module's implementation: the last
+   year log, created for the current age when the log is empty. `rng` and
+   `effects` are the real ones. */
+vi.mock('@/engine/log', () => ({
   currentYearLog: (state: GameState): YearLog => {
     const last = state.log[state.log.length - 1];
     if (last) {
@@ -23,8 +23,6 @@ vi.mock('@/engine/ageUp', () => ({
     state.log.push(fresh);
     return fresh;
   },
-  ageUp: (): void => undefined,
-  resolveChoice: (): void => undefined,
 }));
 
 import { killCharacter } from '@/engine/death';

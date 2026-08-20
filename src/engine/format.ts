@@ -5,7 +5,8 @@
  * handed, so the UI and the engine can both call them freely.
  */
 
-import type { Ctx, GameState, Person } from '@/types';
+import { partnerOf } from '@/engine/people';
+import type { Ctx, GameState } from '@/types';
 
 /** Groups an unsigned integer with commas without depending on host locale data. */
 function group(abs: number): string {
@@ -43,20 +44,11 @@ export function fmtMoneyCompact(n: number): string {
   return `${sign}$${round1(abs / 1e12)}T`;
 }
 
-/** Name of the current spouse, else the current partner, else undefined. */
-function currentPartner(state: GameState): Person | undefined {
-  const people = Object.values(state.people);
-  return (
-    people.find((p) => p.alive && p.kind === 'spouse') ??
-    people.find((p) => p.alive && p.kind === 'partner')
-  );
-}
-
 /** Substitutes `{name} {firstName} {lastName} {he} {him} {his} {partner} {country} {age}`. */
 export function fillTemplate(text: string, state: GameState): string {
   if (text.indexOf('{') === -1) return text;
   const c = state.character;
-  const partner = currentPartner(state);
+  const partner = partnerOf(state);
   // Null prototype: token text is player-reachable (a typed first name is echoed
   // back through resolveText), so `{toString}` must not find an inherited member.
   const values: Record<string, string> = Object.create(null) as Record<string, string>;

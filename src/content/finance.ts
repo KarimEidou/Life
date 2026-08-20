@@ -1,3 +1,4 @@
+import { free } from '@/content/lib';
 import type { ContentPack, Ctx, EventDef } from '@/types';
 
 /**
@@ -17,11 +18,6 @@ import type { ContentPack, Ctx, EventDef } from '@/types';
 /* ------------------------------------------------------------------ */
 /* Lookups                                                             */
 /* ------------------------------------------------------------------ */
-
-/** Not behind bars. Asked by everything that happens out in the world. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
 
 /** Paying their own bills: nobody's spare room, so a utility spike lands. */
 function payingOwnBills(ctx: Ctx): boolean {

@@ -2,6 +2,7 @@
  * Death check: the last phase of every year.
  */
 
+import { findById } from '@/engine/registry';
 import type { AddictionKey, Ctx, IllnessDef, LogEntry } from '@/types';
 
 /**
@@ -30,10 +31,8 @@ function clamp(n: number, min: number, max: number): number {
   return n < min ? min : n > max ? max : n;
 }
 
-/** Widened lookup: a hand-built or partially loaded registry can miss the id. */
 function findIllness(ctx: Ctx, defId: string): IllnessDef | undefined {
-  const byId: Record<string, IllnessDef | undefined> = ctx.reg.illnessesById;
-  return byId[defId];
+  return findById(ctx.reg.illnessesById, ctx.reg.illnesses, defId);
 }
 
 /** Per-year probability of dying, from age, health, illnesses and addictions. */

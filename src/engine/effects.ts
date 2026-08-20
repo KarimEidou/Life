@@ -7,6 +7,7 @@
 
 import type { Effect, EffectCtx, LogEntry, Person, RelKind } from '@/types';
 import { fillTemplate } from '@/engine/format';
+import { livingPeople, partnerOf } from '@/engine/people';
 
 /** Kinds `{kind:'rel', who:'random-family'}` may land on. */
 const FAMILY_KINDS: readonly RelKind[] = ['mother', 'father', 'sibling', 'child'];
@@ -91,16 +92,10 @@ function resolvePerson(ctx: EffectCtx, who: string): Person | undefined {
     return personById(people, target.id) ?? target;
   }
   if (who === 'partner') {
-    const list = Object.values(people);
-    return (
-      list.find((p) => p.alive && p.kind === 'spouse') ??
-      list.find((p) => p.alive && p.kind === 'partner')
-    );
+    return partnerOf(ctx.state);
   }
   if (who === 'random-family') {
-    const family = Object.values(people).filter(
-      (p) => p.alive && FAMILY_KINDS.includes(p.kind)
-    );
+    const family = livingPeople(ctx.state).filter((p) => FAMILY_KINDS.includes(p.kind));
     // Guard before picking: an empty pool must not consume a draw.
     return family.length > 0 ? ctx.rng.pick(family) : undefined;
   }

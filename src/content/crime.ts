@@ -1,4 +1,4 @@
-import { addPerson } from '@/engine/state';
+import { addPerson, alivePeople, inside } from '@/content/lib';
 import type {
   Character,
   ContentPack,
@@ -9,7 +9,6 @@ import type {
   EventDef,
   GameState,
   InteractionDef,
-  Person,
   PrisonState,
 } from '@/types';
 
@@ -167,20 +166,9 @@ const crimes: CrimeDef[] = [
 /* Prison lookups                                                      */
 /* ------------------------------------------------------------------ */
 
-/** Behind bars. Every row and event in this half of the pack asks first. */
-function inside(ctx: Ctx): boolean {
-  return ctx.c.prison !== null;
-}
-
 /** A sentence number that survives a save holding anything at all. */
 function years(raw: number): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 0;
-}
-
-/** Everyone still alive. Widened first: a loaded save can hold a hole. */
-function alivePeople(state: GameState): Person[] {
-  const list: (Person | undefined)[] = Object.values(state.people);
-  return list.filter((p): p is Person => p !== undefined && p.alive === true);
 }
 
 /** Somebody who would actually make the drive on a Sunday. */

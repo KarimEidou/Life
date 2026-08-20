@@ -2,9 +2,10 @@
  * The year loop: the one place a life advances in time.
  */
 
-import { killCharacter } from '@/engine/death';
+import { settleDeath } from '@/engine/death';
 import { applyEffects } from '@/engine/effects';
 import { fillTemplate } from '@/engine/format';
+import { currentYearLog } from '@/engine/log';
 import { agingPhase } from '@/engine/phases/aging';
 import { careerPhase } from '@/engine/phases/career';
 import { deathCheckPhase } from '@/engine/phases/deathCheck';
@@ -13,7 +14,8 @@ import { eventsPhase } from '@/engine/phases/events';
 import { financePhase } from '@/engine/phases/finance';
 import { healthPhase } from '@/engine/phases/health';
 import { relationshipsPhase } from '@/engine/phases/relationships';
-import { createRng } from '@/engine/rng';
+import { findById } from '@/engine/registry';
+import { createRng, isDrawableWeight } from '@/engine/rng';
 import type {
   ContentRegistry,
   Ctx,
@@ -23,11 +25,11 @@ import type {
   GameState,
   LogEntry,
   PendingEvent,
-  YearLog,
 } from '@/types';
 
-/** Used when a `death` marker reaches the orchestrator without a stated cause. */
-const DEFAULT_DEATH_CAUSE = 'natural causes';
+/* Re-exported from its own module so callers outside the engine keep one import
+   path, while nothing inside the engine has to import the orchestrator to log. */
+export { currentYearLog } from '@/engine/log';
 
 /** Stands in for a discarded card that carried no icon of its own. */
 const LOST_CHOICE_ICON = '❔';
@@ -35,30 +37,20 @@ const LOST_CHOICE_ICON = '❔';
 /** Neutral line logged in place of an outcome the current content cannot roll. */
 const LOST_CHOICE_TEXT = 'The moment passed before you could decide.';
 
-/** Returns the log for the current age/year, appending a fresh one when missing. */
-export function currentYearLog(state: GameState): YearLog {
-  const last = state.log[state.log.length - 1];
-  if (last) return last;
-  const fresh: YearLog = { age: state.character.age, year: state.year, entries: [] };
-  state.log.push(fresh);
-  return fresh;
-}
-
 /**
- * Finishes a death that a phase or an effect only marked.
- * `{kind:'death'}` effects and `deathCheckPhase` set `phase`/`pendingDeathCause`
- * and stop; the obituary is built here, once, and the choice queue is dropped.
- * Returns true when the life has ended.
+ * The fixed pipeline order, as a value: aging, health, education,
+ * relationships, career, finance, events, deathCheck.
  */
-function settleDeath(state: GameState, reg: ContentRegistry): boolean {
-  if (state.phase !== 'dead') return false;
-  if (!state.death) {
-    const cause = String(state.character.flags.pendingDeathCause ?? DEFAULT_DEATH_CAUSE);
-    killCharacter(state, reg, cause);
-  }
-  state.pending = [];
-  return true;
-}
+export const PHASES: readonly ((ctx: Ctx) => LogEntry[])[] = [
+  agingPhase,
+  healthPhase,
+  educationPhase,
+  relationshipsPhase,
+  careerPhase,
+  financePhase,
+  eventsPhase,
+  deathCheckPhase,
+];
 
 /**
  * Advances one year. Throws unless `phase === 'alive'`, having first repaired an
@@ -89,21 +81,7 @@ export function ageUp(state: GameState, reg: ContentRegistry): void {
 
   const ctx: Ctx = { state, c: state.character, rng: createRng(state), reg };
 
-  /* Built per call rather than at module scope: phase modules may import back
-     into this one, and a list built at import time could capture a binding that
-     the circular import has not initialised yet. */
-  const phases: ((ctx: Ctx) => LogEntry[])[] = [
-    agingPhase,
-    healthPhase,
-    educationPhase,
-    relationshipsPhase,
-    careerPhase,
-    financePhase,
-    eventsPhase,
-    deathCheckPhase,
-  ];
-
-  for (const phase of phases) {
+  for (const phase of PHASES) {
     const entries = phase(ctx);
     if (entries.length > 0) currentYearLog(state).entries.push(...entries);
     // `awaitingChoice` (from the events phase) does not halt the year; death does.
@@ -111,27 +89,24 @@ export function ageUp(state: GameState, reg: ContentRegistry): void {
   }
 }
 
-/** Widened lookup: a hand-built or partially loaded registry can miss the id. */
 function findEvent(reg: ContentRegistry, eventId: string): EventDef | undefined {
-  const byId: Record<string, EventDef | undefined> = reg.eventsById;
-  return byId[eventId];
+  return findById(reg.eventsById, reg.events, eventId);
 }
 
 /**
  * True when `rng.weighted` has something to land on in this choice.
  *
- * Mirrors that function's own predicate: only a finite, strictly positive
- * weight can be rolled, so a list of zeroes or negatives — and an empty list —
- * makes the call throw. `validateRegistry` flags such a choice, but it is an
- * authoring lint nothing runs at load time, so an unvalidated pack reaches
- * `resolveChoice` intact and has to be handled here.
+ * A list of zeroes or negatives — and an empty list — makes that call throw.
+ * `validateRegistry` flags such a choice, but it is an authoring lint nothing
+ * runs at load time, so an unvalidated pack reaches `resolveChoice` intact and
+ * has to be handled here.
  */
 function canRollOutcome(choice: EventChoice): boolean {
-  /* Widened like `findEvent`: a hand-built or partially loaded pack can ship a
-     choice with no outcome list at all. */
+  /* Widened, like every registry read: a hand-built or partially loaded pack
+     can ship a choice with no outcome list at all. */
   const outcomes: readonly EventChoiceOutcome[] | undefined = choice.outcomes;
   if (!outcomes) return false;
-  return outcomes.some((o) => Number.isFinite(o.weight) && o.weight > 0);
+  return outcomes.some((o) => isDrawableWeight(o.weight));
 }
 
 /**

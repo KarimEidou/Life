@@ -1,14 +1,12 @@
-import { addPerson } from '@/engine/state';
-import type {
-  ContentPack,
-  Ctx,
-  Effect,
-  EffectCtx,
-  Gender,
-  InteractionDef,
-  GameState,
-  Person,
-} from '@/types';
+import {
+  ROLLED_GENDERS,
+  addPerson,
+  alivePets,
+  counter,
+  firstNameOf,
+  free,
+} from '@/content/lib';
+import type { ContentPack, Ctx, Effect, EffectCtx, InteractionDef } from '@/types';
 
 /**
  * Self-directed activities: gym, library, travel, nightlife, shopping and pets.
@@ -19,41 +17,20 @@ import type {
  * died two phases ago, and `Character.flags` is plain JSON that may hold a
  * string where a counter is expected.
  *
- * Most rows also ask `free`. The prison pack owns those years, and a weekend in
- * Bali from a cell reads as a bug; the handful that survive incarceration (a
- * book, the yard, the prison library) deliberately do not ask.
+ * Most rows also ask `free`, under the prison policy documented above `free` in
+ * `@/content/lib`: a weekend in Bali from a cell reads as a bug. The two that
+ * survive incarceration are the two the institution provides — a library and a
+ * book — and they deliberately do not ask. The yard is not among them: it is
+ * the crime pack's own `act-prison-workout`, and `act-gym` is the $40
+ * membership outside it.
  */
 
 /* ------------------------------------------------------------------ */
 /* Lookups                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Not behind bars. Asked by anything that happens out in the world. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
-
-/** Every pet still alive. Widened first: a loaded save can hold a hole. */
-function alivePets(state: GameState): Person[] {
-  const list: (Person | undefined)[] = Object.values(state.people);
-  return list.filter((p): p is Person => p !== undefined && p.alive === true && p.kind === 'pet');
-}
-
 function hasPet(ctx: Ctx): boolean {
   return alivePets(ctx.state).length > 0;
-}
-
-/** The name a sentence should call an animal, never an empty string. */
-function firstNameOf(person: Person, fallback = 'your pet'): string {
-  const parts = person.name.trim().split(/\s+/);
-  return parts[0] || fallback;
-}
-
-/** A flag counter that survives a save holding a string, a boolean or NaN. */
-function counter(state: GameState, flag: string): number {
-  const raw = state.character.flags[flag];
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return 0;
-  return Math.floor(raw);
 }
 
 /** Bumps one of the character's own counters by a step. */
@@ -65,8 +42,6 @@ function bumpCounter(flag: string, step = 1): Effect {
     },
   };
 }
-
-const ROLLED_GENDERS: readonly Gender[] = ['male', 'female'];
 
 /* ------------------------------------------------------------------ */
 /* Flavour pools                                                       */
@@ -202,6 +177,10 @@ const mindBody: InteractionDef[] = [
     icon: '🏋️',
     cost: 40,
     minAge: 12,
+    /* A membership, a leg day and a lift home. `act-prison-workout` is the yard
+       version, and `ev-health-gym-injury` already reads the habit as an outside
+       one — it asks `free` before it will hand out the torn shoulder. */
+    condition: free,
     resolve: (ctx: Ctx) => ({
       text: ctx.rng.chance(0.5)
         ? 'You lifted things and put them back down. It counts.'
@@ -882,7 +861,7 @@ const pets: InteractionDef[] = [
       if (!pet) {
         return { text: 'You looked for the lead and thought better of it.', effects: [] };
       }
-      const name = firstNameOf(pet);
+      const name = firstNameOf(pet, 'your pet');
       return {
         text: `You took ${name} out. Two miles, one squirrel, no dignity.`,
         effects: [
@@ -909,7 +888,7 @@ const pets: InteractionDef[] = [
         // would net the visit to $0 and say the opposite of what happened.
         return { text: 'You had nobody to take, and the vet charged you anyway.', effects: [] };
       }
-      const name = firstNameOf(pet);
+      const name = firstNameOf(pet, 'your pet');
       return {
         text: `${name} was very brave about the whole thing. You were not.`,
         effects: [

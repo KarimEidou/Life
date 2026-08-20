@@ -139,8 +139,14 @@ export function OccupationSheet(): ReactElement | null {
                 testId="job-raise"
                 fullWidth
                 onClick={() => {
+                  // One field name for one idea: the answer to a raise is prose
+                  // either way, and the store hands it back under `ok`.
                   const r = useGameStore.getState().askForRaise();
-                  useUiStore.getState().addToast({ icon: r.ok ? '💸' : '🙅', title: r.text });
+                  useUiStore.getState().addToast(
+                    r.ok
+                      ? { icon: '💸', title: r.text ?? 'Your boss said yes.' }
+                      : { icon: '🙅', title: r.reason }
+                  );
                 }}
               >
                 Ask for a raise
@@ -150,7 +156,10 @@ export function OccupationSheet(): ReactElement | null {
                 testId="job-quit"
                 fullWidth
                 onClick={() => {
-                  useGameStore.getState().quitJob();
+                  const r = useGameStore.getState().quitJob();
+                  if (!r.ok) {
+                    useUiStore.getState().addToast({ icon: '🚫', title: r.reason });
+                  }
                 }}
               >
                 Quit job

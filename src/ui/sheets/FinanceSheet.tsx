@@ -17,8 +17,17 @@ import { useUiStore } from '@/store/uiStore';
 import type { Investments } from '@/types';
 import { SheetChrome } from '@/ui/sheets/SheetChrome';
 
-/** Ticket sizes the shared amount picker offers deposits, withdrawals and repayments. */
+/**
+ * Ticket sizes both money pickers offer. Each picker keeps its own selection:
+ * one control shared between the investment rows and the loan rows would let an
+ * investment ticket chosen at the top of the sheet be spent by a Repay button
+ * further down, which is a hundredfold difference with nothing on screen to
+ * show it.
+ */
 const AMOUNTS: readonly number[] = [100, 1000, 10000];
+
+/** The repayment picker's extra chip: as much of the loan as the cash covers. */
+const REPAY_ALL = 'all';
 
 const INVEST_KINDS: readonly (keyof Investments)[] = ['savings', 'index', 'crypto'];
 
@@ -73,7 +82,8 @@ function capitalize(word: string): string {
 /** Cash on hand, the investment pots, outstanding loans and the bank counter. */
 export function FinanceSheet(): ReactElement | null {
   const game = useGameStore((s) => s.game);
-  const [amount, setAmount] = useState(100);
+  const [investAmount, setInvestAmount] = useState(100);
+  const [repayAmount, setRepayAmount] = useState<number | typeof REPAY_ALL>(100);
   const [borrow, setBorrow] = useState('');
   if (game === null) {
     return null;
@@ -81,19 +91,46 @@ export function FinanceSheet(): ReactElement | null {
 
   const c = game.character;
 
+  /* The store words every refusal and this sheet only shows it: which side of a
+     move ran out, and whether a finished life may move money at all, are the
+     engine's rules to state, not this sheet's to guess at. */
+  const refused = (reason: string): void => {
+    useUiStore.getState().addToast({ icon: '🚫', title: reason });
+  };
+
   const depositNow = (kind: keyof Investments): void => {
-    const ok = useGameStore.getState().deposit(kind, amount);
-    if (!ok) {
-      useUiStore.getState().addToast({ icon: '🚫', title: "You don't have that much." });
+    const r = useGameStore.getState().deposit(kind, investAmount);
+    if (!r.ok) {
+      refused(r.reason);
     }
   };
 
   const withdrawNow = (kind: keyof Investments): void => {
-    const ok = useGameStore.getState().withdraw(kind, amount);
-    if (!ok) {
-      useUiStore.getState().addToast({ icon: '🚫', title: 'Not that much invested.' });
+    const r = useGameStore.getState().withdraw(kind, investAmount);
+    if (!r.ok) {
+      refused(r.reason);
     }
   };
+
+  const repayNow = (loanId: string, principal: number): void => {
+    const before = c.money;
+    const ticket = repayAmount === REPAY_ALL ? principal : repayAmount;
+    const r = useGameStore.getState().repayLoan(loanId, ticket);
+    if (!r.ok) {
+      refused(r.reason);
+      return;
+    }
+    // The ticket is a ceiling, not the sum that moved: the engine caps a payment
+    // at the cash on hand and at what is left of the loan, so the only honest
+    // number to report is the one that actually left the wallet.
+    const after = useGameStore.getState().game?.character.money ?? before;
+    useUiStore.getState().addToast({ icon: '✅', title: `Paid ${fmtMoney(before - after)}.` });
+  };
+
+  /* The sum rides on the button as well as in the picker above it: a long loan
+     list scrolls the picker out of view, and a repayment is the one money tap in
+     this sheet with no confirmation step in front of it. */
+  const repayLabel = `Repay ${repayAmount === REPAY_ALL ? 'All' : fmtMoneyCompact(repayAmount)}`;
 
   const borrowNow = (): void => {
     // Every amount the app shows is comma-grouped, so the field has to read one
@@ -131,9 +168,9 @@ export function FinanceSheet(): ReactElement | null {
               label: fmtMoneyCompact(n),
               testId: `fin-amount-${String(n)}`,
             }))}
-            value={String(amount)}
+            value={String(investAmount)}
             onChange={(id) => {
-              setAmount(Number.parseInt(id, 10));
+              setInvestAmount(Number.parseInt(id, 10));
             }}
           />
           {INVEST_KINDS.map((kind) => (
@@ -172,6 +209,20 @@ export function FinanceSheet(): ReactElement | null {
           <div style={quietStyle}>Debt-free.</div>
         ) : (
           <Card>
+            <SegmentedControl
+              options={[
+                ...AMOUNTS.map((n) => ({
+                  id: String(n),
+                  label: fmtMoneyCompact(n),
+                  testId: `fin-repay-amount-${String(n)}`,
+                })),
+                { id: REPAY_ALL, label: 'All', testId: `fin-repay-amount-${REPAY_ALL}` },
+              ]}
+              value={String(repayAmount)}
+              onChange={(id) => {
+                setRepayAmount(id === REPAY_ALL ? REPAY_ALL : Number.parseInt(id, 10));
+              }}
+            />
             {c.loans.map((loan) => (
               <div key={loan.id} style={loanRowStyle}>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -186,10 +237,10 @@ export function FinanceSheet(): ReactElement | null {
                   size="sm"
                   testId={`loan-repay-${loan.id}`}
                   onClick={() => {
-                    useGameStore.getState().repayLoan(loan.id, amount);
+                    repayNow(loan.id, loan.principal);
                   }}
                 >
-                  Repay
+                  {repayLabel}
                 </Button>
               </div>
             ))}

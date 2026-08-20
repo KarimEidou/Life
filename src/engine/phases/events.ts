@@ -4,6 +4,7 @@
 
 import { applyEffects } from '@/engine/effects';
 import { resolveText } from '@/engine/format';
+import { isDrawableWeight } from '@/engine/rng';
 import type { Ctx, EventChoice, EventDef, LogEntry, PendingEvent } from '@/types';
 
 /** Chance of drawing a first event each year, then a second, distinct one. */
@@ -13,12 +14,9 @@ const SECOND_EVENT_CHANCE = 0.4;
 /**
  * Age window, once-per-life history and the def's own condition.
  *
- * The weight test mirrors `rng.weighted`'s own predicate exactly — finite AND
- * strictly positive — so the pool this builds always has a drawable candidate.
- * `ageUp`'s `canRollOutcome` is the precedent: anything looser lets a weight
- * through that `weighted` then refuses, and it throws out of `eventsPhase` with
+ * `isDrawableWeight` keeps the pool to defs the later `rng.weighted` can land
+ * on: a weight it refuses would make that call throw out of `eventsPhase` with
  * `agingPhase` already run, stranding a half-advanced year with no legal move.
- * `Infinity > 0` is true, which is exactly how that gap opens.
  * `validateRegistry` reports such weights as content bugs, but it is an
  * authoring lint nothing runs at load time, so an unvalidated pack reaches this
  * function intact and has to be handled here.
@@ -27,7 +25,7 @@ function isEligible(ctx: Ctx, def: EventDef): boolean {
   const age = ctx.c.age;
   if (age < def.minAge || age > def.maxAge) return false;
   if (def.oncePerLife === true && ctx.state.firedEvents.includes(def.id)) return false;
-  if (!(Number.isFinite(def.weight) && def.weight > 0)) return false;
+  if (!isDrawableWeight(def.weight)) return false;
   return def.condition?.(ctx) !== false;
 }
 

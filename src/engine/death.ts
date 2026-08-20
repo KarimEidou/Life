@@ -2,11 +2,17 @@
  * End of life and the hand-off to the next generation.
  */
 
-import { currentYearLog } from '@/engine/ageUp';
 import { clampMoney, clampStat, personById } from '@/engine/effects';
 import { fmtMoneyCompact } from '@/engine/format';
+import { currentYearLog } from '@/engine/log';
+import { livingOfKind, partnerOf } from '@/engine/people';
 import { createRng } from '@/engine/rng';
+import { MOVE_OUT_AGE } from '@/engine/rules';
 import { addPerson, pronounsFor } from '@/engine/state';
+/* `wealth`, never `phases/finance`: it is a leaf with no phase, no registry and
+   no rng, so the estate can be valued while the character is already dead and
+   death still does not depend on the finance phase. */
+import { netWorth } from '@/engine/wealth';
 import type {
   AncestorRecord,
   Character,
@@ -25,32 +31,6 @@ const INHERITANCE_SHARE = 0.8;
 
 /** Stats an heir starts from before their own `Person.stats` are laid over them. */
 const HEIR_STATS: Stats = { health: 85, happiness: 70, smarts: 60, looks: 60 };
-
-/** Age at which an heir is already living on their own. */
-const MOVE_OUT_AGE = 22;
-
-/**
- * Cash + investments + asset values - loan principals.
- *
- * Deliberately inlined instead of importing `finance.netWorth`: the estate is
- * needed while the character is already dead, and death must not depend on the
- * finance phase.
- */
-function estateValue(state: GameState): number {
-  const c = state.character;
-  const invested = c.investments.savings + c.investments.index + c.investments.crypto;
-  const assets = c.assets.reduce((sum, a) => sum + a.value, 0);
-  const debt = c.loans.reduce((sum, l) => sum + l.principal, 0);
-  const total = c.money + invested + assets - debt;
-  /* A balance sheet that does not add up is worth nothing rather than `NaN`:
-     `Math.max(0, NaN)` is `NaN`, so the floor the callers put under this would
-     not hold. Same guard as `content/achievements.ts`'s copy of the sum. */
-  return Number.isFinite(total) ? Math.round(total) : 0;
-}
-
-function aliveChildren(state: GameState): Person[] {
-  return Object.values(state.people).filter((p) => p.alive && p.kind === 'child');
-}
 
 /**
  * Age from which a life with no work behind it is read as unemployment. Below
@@ -79,8 +59,8 @@ function occupationOf(c: Character): string {
 export function killCharacter(state: GameState, reg: ContentRegistry, cause: string): void {
   const c = state.character;
   const age = c.age;
-  const netWorth = estateValue(state);
-  const kids = aliveChildren(state).length;
+  const estate = netWorth(state);
+  const kids = livingOfKind(state, 'child').length;
 
   const flagged = Number(c.flags.jobsHeld ?? 0);
   const jobsHeld =
@@ -92,11 +72,11 @@ export function killCharacter(state: GameState, reg: ContentRegistry, cause: str
     `${c.firstName} ${c.lastName}, ${birthYear}-${state.year}.`,
     `Died of ${cause} at ${age}.`,
     occupation ? `${occupation}.` : '',
-    `Left ${fmtMoneyCompact(netWorth)} and ${kids} ${kids === 1 ? 'child' : 'children'}.`,
+    `Left ${fmtMoneyCompact(estate)} and ${kids} ${kids === 1 ? 'child' : 'children'}.`,
   ];
   const obituary = clauses.filter((part) => part.length > 0).join(' ');
 
-  state.death = { cause, age, obituary, epitaphStats: { netWorth, jobsHeld, kids } };
+  state.death = { cause, age, obituary, epitaphStats: { netWorth: estate, jobsHeld, kids } };
   state.phase = 'dead';
   currentYearLog(state).entries.push({
     icon: '💀',
@@ -104,6 +84,29 @@ export function killCharacter(state: GameState, reg: ContentRegistry, cause: str
     text: `You died of ${cause} at age ${age}.`,
   });
   state.pending = [];
+}
+
+/** Used when a death marker reaches `settleDeath` without a stated cause. */
+export const DEFAULT_DEATH_CAUSE = 'natural causes';
+
+/**
+ * Finishes a death that a phase, an effect or a player action only marked.
+ * `{kind:'death'}` effects and `deathCheckPhase` set `phase`/`pendingDeathCause`
+ * and stop; the obituary is built here, once, and the choice queue is dropped.
+ * Returns true when the life has ended.
+ *
+ * Death protocol: only `killCharacter` writes `state.death`, and this is the one
+ * way to reach it from a marker — every settler in the engine calls it, so a new
+ * one has a function to call rather than six lines to copy.
+ */
+export function settleDeath(state: GameState, reg: ContentRegistry): boolean {
+  if (state.phase !== 'dead') return false;
+  if (!state.death) {
+    const cause = String(state.character.flags.pendingDeathCause ?? DEFAULT_DEATH_CAUSE);
+    killCharacter(state, reg, cause);
+  }
+  state.pending = [];
+  return true;
 }
 
 /** Highest level completed and the level being attended, purely from age. */
@@ -157,12 +160,15 @@ export function startLegacy(
   const heir = personById(state.people, childId);
   if (!heir) throw new Error(`startLegacy: unknown person ${childId}`);
   if (heir.kind !== 'child') throw new Error(`startLegacy: ${childId} is not a child`);
-  if (!heir.alive) throw new Error(`startLegacy: ${childId} is not alive`);
+  /* `alive !== true`, the very test `livingOfKind` applies: the estate is split
+     between the living children, so an heir this guard let through on a truthier
+     rule than theirs would divide the inheritance by an empty list. */
+  if (heir.alive !== true) throw new Error(`startLegacy: ${childId} is not alive`);
 
   const previous = state.character;
-  const heirs = aliveChildren(state);
+  const heirs = livingOfKind(state, 'child');
   const inheritance = Math.round(
-    (INHERITANCE_SHARE * Math.max(0, estateValue(state))) / heirs.length
+    (INHERITANCE_SHARE * Math.max(0, netWorth(state))) / heirs.length
   );
 
   const firstName = heir.name.split(' ')[0] ?? heir.name;
@@ -199,7 +205,7 @@ export function startLegacy(
   const deathAge = state.death ? state.death.age : previous.age;
   const cause = state.death
     ? state.death.cause
-    : String(previous.flags.pendingDeathCause ?? 'natural causes');
+    : String(previous.flags.pendingDeathCause ?? DEFAULT_DEATH_CAUSE);
   const ancestor: AncestorRecord = {
     name: `${previous.firstName} ${previous.lastName}`,
     years: `${state.year - deathAge}-${state.year}`,
@@ -248,10 +254,7 @@ export function startLegacy(
     });
   }
 
-  const people = Object.values(state.people);
-  const survivor =
-    people.find((p) => p.alive && p.kind === 'spouse') ??
-    people.find((p) => p.alive && p.kind === 'partner');
+  const survivor = partnerOf(state);
   if (survivor) {
     addPerson(next, {
       kind: survivor.gender === 'male' ? 'father' : 'mother',

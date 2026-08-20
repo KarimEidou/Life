@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { careerPhase } from '@/engine/phases/career';
+import { resolveChoice } from '@/engine/ageUp';
+import { commitCrime, runInteraction } from '@/engine/interactions';
+import { applyForJob, careerPhase } from '@/engine/phases/career';
+import { deathProbability } from '@/engine/phases/deathCheck';
 import { educationPhase } from '@/engine/phases/education';
-import { buildRegistry, emptyPack, validateRegistry } from '@/engine/registry';
+import { buildRegistry, emptyPack, findById, validateRegistry } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
 import { createLife } from '@/engine/state';
 import type {
@@ -15,9 +18,11 @@ import type {
   Ctx,
   EventChoice,
   EventDef,
+  GameState,
   IllnessDef,
   InteractionDef,
   JobDef,
+  LogEntry,
   NamePool,
   SchoolDef,
 } from '@/types';
@@ -160,6 +165,49 @@ const INHERITED_KEYS = [
 function ctxFor(reg: ContentRegistry, seed = 1): Ctx {
   const state = createLife(reg, { seed });
   return { state, c: state.character, rng: createRng(state), reg };
+}
+
+/** The index shape a registry nobody built through `buildRegistry` has. */
+function plainIndex<T extends { id: string }>(items: readonly T[]): Record<string, T> {
+  const index: Record<string, T> = {};
+  for (const item of items) index[item.id] = item;
+  return index;
+}
+
+/**
+ * A registry assembled by hand rather than by `buildRegistry` — the shape the
+ * engine suites use, and the shape a partially loaded or externally supplied one
+ * has: every index a plain object literal, so every index inherits.
+ */
+function handBuilt(parts: Partial<ContentRegistry> = {}): ContentRegistry {
+  return {
+    packs: [],
+    events: [],
+    eventsById: {},
+    interactions: [],
+    interactionsById: {},
+    jobs: [],
+    jobsById: {},
+    assets: [],
+    assetsById: {},
+    illnesses: [],
+    illnessesById: {},
+    schools: [],
+    schoolsById: {},
+    countries: [],
+    countriesById: {},
+    crimes: [],
+    crimesById: {},
+    achievements: [],
+    achievementsById: {},
+    namePools: {},
+    ...parts,
+  };
+}
+
+/** Entries of the year the action or phase under test wrote into. */
+function lastEntries(state: GameState): LogEntry[] {
+  return state.log[state.log.length - 1]?.entries ?? [];
 }
 
 describe('buildRegistry', () => {
@@ -324,6 +372,161 @@ describe('buildRegistry: inherited members are not content', () => {
     expect(state.character.countryId).toBe('us');
     expect(state.character.flags.countryLabel).toBe('us');
     expect(state.log[0]?.entries[0]?.text).not.toContain('undefined');
+  });
+});
+
+/**
+ * The lookup every one of those indexes is read through.
+ *
+ * `buildRegistry` hands out tables that inherit nothing, but it is not the only
+ * thing that builds a registry: a hand-built, partially loaded or externally
+ * supplied one indexes with a plain object literal, so the guard has to live in
+ * the reader as well as in the builder.
+ */
+describe('findById', () => {
+  it('answers from the index, which wins over the list', () => {
+    const indexed = job({ title: 'Indexed' });
+    const listed = job({ title: 'Listed' });
+    expect(findById(plainIndex([indexed]), [listed], 'clerk')).toBe(indexed);
+  });
+
+  it('falls back to the list when the index does not hold the id', () => {
+    const listed = job();
+    expect(findById(plainIndex<JobDef>([]), [listed], 'clerk')).toBe(listed);
+  });
+
+  it('answers undefined when neither half holds the id', () => {
+    expect(findById(plainIndex([job()]), [job()], 'ghost')).toBeUndefined();
+  });
+
+  it('refuses every inherited member of a plain-object index', () => {
+    const index = plainIndex([job()]);
+    for (const key of INHERITED_KEYS) {
+      expect(findById(index, [], key), key).toBeUndefined();
+    }
+  });
+
+  it('still answers with a def whose id is an inherited key, from either half', () => {
+    const ghost = job({ id: 'toString' });
+    expect(findById(plainIndex([ghost]), [], 'toString')).toBe(ghost);
+    expect(findById(plainIndex<JobDef>([]), [ghost], 'toString')).toBe(ghost);
+
+    const built = buildRegistry([pack('one', { jobs: [ghost] })]);
+    expect(findById(built.jobsById, built.jobs, 'toString')).toBe(ghost);
+  });
+});
+
+/**
+ * `buildRegistry: inherited members are not content`, run against a registry
+ * `buildRegistry` did not assemble — which is the only shape whose indexes
+ * really do answer `toString`, so it is where the reader's guard is the only
+ * thing standing between a content id and `Object.prototype`.
+ */
+describe('findById: inherited members are not content in a hand-built registry', () => {
+  it('refuses to hire into a job whose id is an inherited key', () => {
+    // `toString` resolved to Function.prototype.toString, which has no `req` at
+    // all: the requirements gate threw before it could refuse the application.
+    const reg = handBuilt();
+    const state = createLife(reg, { seed: 1 });
+    state.character.age = 30;
+
+    expect(applyForJob(state, reg, 'toString')).toEqual({
+      ok: false,
+      reason: 'That job does not exist.',
+    });
+  });
+
+  it('empties a desk whose school id is an inherited key', () => {
+    const ctx = ctxFor(handBuilt());
+    const ed = ctx.c.education;
+    ctx.c.age = 10;
+    ed.level = 'primary';
+    ed.enrolledIn = 'valueOf';
+    ed.year = 0;
+    ed.gpa = 3;
+
+    educationPhase(ctx);
+
+    expect(ed.enrolledIn).toBeUndefined();
+  });
+
+  it('treats a requested country id that is an inherited key as unknown', () => {
+    // `constructor` resolved to the Object constructor, whose `.id` is
+    // undefined — and that undefined became the character's country.
+    const state = createLife(handBuilt(), { seed: 1, countryId: 'constructor' });
+
+    expect(state.character.countryId).toBe('us');
+    expect(state.log[0]?.entries[0]?.text).not.toContain('undefined');
+  });
+
+  it('does not hand a country whose id is an inherited key a pool it never had', () => {
+    /* Pools are keyed by country, so a country legitimately named `toString`
+       used to be handed `Object.prototype.toString` as its pool — and reading
+       `.male` off a function threw before the life existed at all. */
+    const ghost = country({ id: 'toString' });
+    const reg = handBuilt({ countries: [ghost], countriesById: plainIndex([ghost]) });
+
+    const state = createLife(reg, { seed: 1 });
+
+    expect(state.character.countryId).toBe('toString');
+    // No pool for it, so the nameless fallback — not a crash, and not a member.
+    expect(['Alex', 'Riley']).toContain(state.character.firstName);
+  });
+});
+
+/**
+ * The list fallback, at the four lookups that had none.
+ *
+ * `collect` indexes every id it lists, so an index and a list that disagree is
+ * unreachable for anything `buildRegistry` produced; it is the shape a
+ * hand-built or partially loaded registry can have, and these four now answer
+ * it the way the other six always did.
+ */
+describe('findById: an index and a list that disagree', () => {
+  it('counts an illness towards the hazard that only the list declares', () => {
+    const ctx = ctxFor(handBuilt({ illnesses: [illness({ lethality: 0.01 })] }));
+    ctx.c.age = 20;
+    ctx.c.stats.health = 50;
+
+    const well = deathProbability(ctx);
+    ctx.c.illnesses = [{ defId: 'flu', years: 1, treated: false }];
+
+    // Untreated, so the def's lethality counts double.
+    expect(deathProbability(ctx)).toBeCloseTo(well + 0.02, 10);
+  });
+
+  it('resolves a queued card against an event that only the list declares', () => {
+    const def = event({
+      choices: [{ label: 'Yes', outcomes: [{ weight: 1, text: 'You said yes.', effects: [] }] }],
+    });
+    const reg = handBuilt({ events: [def] });
+    const state = createLife(reg, { seed: 1 });
+    state.phase = 'awaitingChoice';
+    // A queued card stores its already-rendered text, not the def's template.
+    state.pending = [
+      { eventId: def.id, text: 'Something happened.', icon: def.icon, choices: [{ label: 'Yes' }] },
+    ];
+
+    resolveChoice(state, reg, 0);
+
+    expect(state.phase).toBe('alive');
+    expect(lastEntries(state).map((entry) => entry.text)).toContain('You said yes.');
+  });
+
+  it('runs an interaction that only the list declares', () => {
+    const reg = handBuilt({ interactions: [interaction()] });
+    const state = createLife(reg, { seed: 1 });
+    state.character.age = 25;
+
+    expect(runInteraction(state, reg, 'gym')?.text).toBe('You worked out.');
+  });
+
+  it('commits a crime that only the list declares', () => {
+    const reg = handBuilt({ crimes: [crime({ successChance: () => 1, payout: [500, 500] })] });
+    const state = createLife(reg, { seed: 1 });
+    state.character.age = 25;
+
+    expect(commitCrime(state, reg, 'shoplift').text).toContain('Shoplifting');
   });
 });
 

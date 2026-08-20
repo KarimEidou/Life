@@ -1,3 +1,4 @@
+import { alivePeople } from '@/content/lib';
 import type {
   ContentPack,
   Ctx,
@@ -5,7 +6,6 @@ import type {
   EffectCtx,
   EventDef,
   GameState,
-  Person,
   YearLog,
 } from '@/types';
 
@@ -106,12 +106,6 @@ function onAVisa(ctx: Ctx): boolean {
 /** Abroad, and still inside the first `n` years of it. */
 function settlingIn(n: number): (ctx: Ctx) => boolean {
   return (ctx) => abroad(ctx) && yearsSettled(ctx) <= n;
-}
-
-/** Everyone still alive. Widened first: a loaded save can hold a hole. */
-function alivePeople(state: GameState): Person[] {
-  const list: (Person | undefined)[] = Object.values(state.people);
-  return list.filter((p): p is Person => p !== undefined && p.alive === true);
 }
 
 /** Somebody back home who would get on a plane for you. */

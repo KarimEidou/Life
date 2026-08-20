@@ -2,8 +2,9 @@
  * Game state construction and whole-life mutations that no phase owns.
  */
 
-import { currentYearLog } from '@/engine/ageUp';
 import { clampMoney, clampStat } from '@/engine/effects';
+import { currentYearLog } from '@/engine/log';
+import { findById, findByKey } from '@/engine/registry';
 import { createRng, initialRngState } from '@/engine/rng';
 import type {
   Character,
@@ -57,8 +58,9 @@ const BIRTH_NOUN: Record<Gender, string> = {
 /**
  * Refusal handed to a player action once the life has ended.
  *
- * Mirrors the wording `interactions.canUse` already refuses with, so the whole
- * engine says the same thing about a finished life.
+ * The one wording: every refusing action quotes this constant rather than
+ * spelling the sentence out, so the whole engine cannot drift apart on what it
+ * says about a finished life.
  */
 export const LIFE_OVER = 'Your life is over.';
 
@@ -85,16 +87,14 @@ const VISA_FEE = 2000;
 /** Years that must pass after an application before another is accepted. */
 const VISA_COOLDOWN_YEARS = 5;
 
-/* Registry maps are typed as total records, so widen before lookup: a hand-built
-   or partially loaded registry can still miss the key we ask for. */
 function findCountry(reg: ContentRegistry, id: string): CountryDef | undefined {
-  const byId: Record<string, CountryDef | undefined> = reg.countriesById;
-  return byId[id] ?? reg.countries.find((country) => country.id === id);
+  return findById(reg.countriesById, reg.countries, id);
 }
 
+/* Pools are keyed by country and the registry publishes no flat pool list, so
+   this gets the own-property half of `findById` and no list fallback. */
 function findNamePool(reg: ContentRegistry, countryId: string): NamePool | undefined {
-  const pools: Record<string, NamePool | undefined> = reg.namePools;
-  return pools[countryId];
+  return findByKey(reg.namePools, countryId);
 }
 
 function givenNames(pool: NamePool | undefined, gender: Gender): string[] {

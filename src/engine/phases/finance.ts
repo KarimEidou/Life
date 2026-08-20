@@ -9,9 +9,12 @@
  * failing both and with something left to seize, by bankruptcy.
  */
 
-import { currentYearLog } from '@/engine/ageUp';
 import { clampMoney, clampStat } from '@/engine/effects';
 import { fmtMoney } from '@/engine/format';
+import { currentYearLog } from '@/engine/log';
+import { livingOfKind } from '@/engine/people';
+import { findById } from '@/engine/registry';
+import { MOVE_OUT_AGE } from '@/engine/rules';
 import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
   AssetDef,
@@ -37,7 +40,6 @@ const TAX_BRACKETS: readonly (readonly [number, number])[] = [
 
 /** Costs start at 18; before that the family pays for everything. */
 const ADULT_AGE = 18;
-const MOVE_OUT_AGE = 22;
 const LIVING_COST = 8000;
 const RENT = 12000;
 const CHILD_COST = 6000;
@@ -98,16 +100,12 @@ const RESALE_RATE = 0.9;
 
 const BANKRUPTCY_GRIEF = 20;
 
-/* Registry maps are typed as total records, so widen before lookup: a hand-built
-   or partially loaded registry can still miss the id we ask for. */
 function findCountry(reg: ContentRegistry, id: string): CountryDef | undefined {
-  const byId: Record<string, CountryDef | undefined> = reg.countriesById;
-  return byId[id] ?? reg.countries.find((country) => country.id === id);
+  return findById(reg.countriesById, reg.countries, id);
 }
 
 function findAsset(reg: ContentRegistry, id: string): AssetDef | undefined {
-  const byId: Record<string, AssetDef | undefined> = reg.assetsById;
-  return byId[id] ?? reg.assets.find((asset) => asset.id === id);
+  return findById(reg.assetsById, reg.assets, id);
 }
 
 /** Reads a numeric flag that older saves or content may have left unset. */
@@ -243,13 +241,11 @@ function ownsProperty(reg: ContentRegistry, state: GameState): boolean {
 }
 
 function hasSpouse(state: GameState): boolean {
-  return Object.values(state.people).some((p) => p.alive && p.kind === 'spouse');
+  return livingOfKind(state, 'spouse').length > 0;
 }
 
 function dependentChildren(state: GameState): number {
-  return Object.values(state.people).filter(
-    (p) => p.alive && p.kind === 'child' && p.age < CHILD_AGE
-  ).length;
+  return livingOfKind(state, 'child').filter((p) => p.age < CHILD_AGE).length;
 }
 
 /**
@@ -545,14 +541,10 @@ export function financePhase(ctx: Ctx): LogEntry[] {
   return entries;
 }
 
-/** Cash plus investments plus asset values, minus outstanding loan principal. */
-export function netWorth(state: GameState): number {
-  const c = state.character;
-  const invested = c.investments.savings + c.investments.index + c.investments.crypto;
-  const assets = c.assets.reduce((sum, asset) => sum + asset.value, 0);
-  const debt = c.loans.reduce((sum, loan) => sum + loan.principal, 0);
-  return Math.round(c.money + invested + assets - debt);
-}
+/* The sum lives in `@/engine/wealth`, a leaf module the obituary and the
+   achievement checks can read without importing a phase. Re-exported under the
+   name the finance sheet and this module's suite already import. */
+export { netWorth } from '@/engine/wealth';
 
 /** Moves cash into an investment vehicle; false when the cash is not there. */
 export function depositInvestment(

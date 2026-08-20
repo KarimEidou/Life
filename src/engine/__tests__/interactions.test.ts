@@ -4,7 +4,7 @@ import { killCharacter } from '@/engine/death';
 import { availableInteractions, canUse, commitCrime, runInteraction } from '@/engine/interactions';
 import { buildRegistry } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
-import { createLife } from '@/engine/state';
+import { LIFE_OVER, createLife } from '@/engine/state';
 import type {
   ContentPack,
   ContentRegistry,
@@ -647,11 +647,16 @@ describe('runInteraction', () => {
         }),
       ],
     });
+    state.pending = [
+      { eventId: 'fork', text: 'A fork in the road.', icon: '🍴', choices: [{ label: 'Right' }] },
+    ];
 
     runInteraction(state, reg, 'skydive');
 
     expect(state.phase).toBe('dead');
     expect(state.death?.cause).toBe('a skydiving accident');
+    // The one settlement drops the queue too: a finished life answers no cards.
+    expect(state.pending).toEqual([]);
     expect(feed(state).map((e) => e.kind)).toEqual(['info', 'death']);
   });
 });
@@ -968,5 +973,22 @@ describe('a finished life', () => {
     expect(state.rngState).toBe(rngBefore);
     // Nothing lands after the death line that closes the feed.
     expect(feed(state)).toHaveLength(entriesBefore);
+  });
+
+  it('refuses with the engine-wide wording, not a copy of it', () => {
+    const state = newLife(9, 40);
+    const reg = regOf({
+      interactions: [interaction()],
+      crimes: [crime({ id: 'rob', label: 'Robbery' })],
+    });
+
+    killCharacter(state, reg, 'a meteor');
+
+    // The same constant the finance, career and education actions refuse with:
+    // a private copy here could drift from it without any test noticing.
+    expect(canUse(ctxOf(state, reg), interaction()).reason).toBe(LIFE_OVER);
+    expect(runInteraction(state, reg, 'gym')?.text).toBe(LIFE_OVER);
+    expect(commitCrime(state, reg, 'rob').text).toBe(LIFE_OVER);
+    expect(LIFE_OVER).toBe('Your life is over.');
   });
 });

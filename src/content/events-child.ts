@@ -9,110 +9,40 @@
  * School is the other gate: `eventsPhase` draws every year whether or not the
  * character has a desk — the ladder only enrols at six, and a dropout never sits
  * down again — so everything premised on a school day asks `inSchool` first.
+ *
+ * Prison is the third, and it reaches further into this pack than it looks:
+ * `crime-shoplift` opens at twelve and every card below whose window still
+ * covers twelve can therefore be dealt to a child serving a sentence. A
+ * lemonade stand at the end of the driveway and a sleepover at a friend's house
+ * are exactly what the prison policy documented above `free` in `@/content/lib`
+ * calls class 2, so they ask `free` — directly or through `inSchool`, which
+ * folds it in. A growth spurt is not: a cell delivers one as readily as a house
+ * does, and gating it would be the over-correction the policy warns about.
+ * Cards that close before twelve are out of a sentence's reach and stay plain.
  */
 
-import { addPerson } from '@/engine/state';
-import type {
-  ContentPack,
-  Ctx,
-  Effect,
-  EffectCtx,
-  EventDef,
-  Gender,
-  NamePool,
-  Person,
-  RelKind,
-} from '@/types';
-
-/** Genders a generated person is rolled as. */
-const GENDERS: readonly Gender[] = ['male', 'female'];
+import {
+  ROLLED_GENDERS,
+  addPerson,
+  free,
+  hasSibling,
+  inSchool,
+  parentsRel,
+  rollName,
+  siblingName,
+  siblingRel,
+} from '@/content/lib';
+import type { ContentPack, Effect, EffectCtx, EventDef } from '@/types';
 
 /** Countries where "school is closed for snow" is a thing that happens. */
 const SNOW_COUNTRIES: readonly string[] = ['us', 'uk', 'ca', 'de', 'fr', 'jp'];
-
-/** Keeps an affinity inside the 0..100 the engine stores, healing the way
- *  `clampStat` does: an unreadable `rel` out of a drifted save settles at 0
- *  rather than being written back, because `relationshipsPhase.drift` carries a
- *  NaN affinity forward untouched (`Math.max(0, NaN)`) for every kin this
- *  touches, so a poisoned one would never recover. */
-function clampRel(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
-  return Math.round(bounded * 10) / 10;
-}
-
-/** Every living person of one relationship kind, in the order they joined the life. */
-function livingKin(people: Record<string, Person>, kind: RelKind): Person[] {
-  return Object.values(people).filter((person) => person.alive && person.kind === kind);
-}
-
-function hasSibling(ctx: Ctx): boolean {
-  return livingKin(ctx.state.people, 'sibling').length > 0;
-}
-
-/** Every school-life event needs a desk to happen at; a cell is not one.
- *  The desk is empty until the year the ladder enrols a six-year-old, and empty
- *  for good after a dropout — `flags.droppedOut` stops it re-enrolling anyone. */
-function inSchool(ctx: Ctx): boolean {
-  return ctx.c.education.enrolledIn !== undefined && ctx.c.prison === null;
-}
-
-/** The sibling the texts name and the effects hit: always the first one listed. */
-function firstSibling(people: Record<string, Person>): Person | undefined {
-  return livingKin(people, 'sibling')[0];
-}
-
-/** Given name of the first living sibling, or a neutral stand-in. */
-function siblingName(ctx: Ctx): string {
-  const sibling = firstSibling(ctx.state.people);
-  if (!sibling) return 'Your sibling';
-  const given = sibling.name.split(' ')[0];
-  return given.length > 0 ? given : sibling.name;
-}
-
-/** Nudges every living parent; a no-op when both are gone. */
-function parentsRel(delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      for (const person of Object.values(ctx.state.people)) {
-        if (!person.alive) continue;
-        if (person.kind === 'mother' || person.kind === 'father') {
-          person.rel = clampRel(person.rel + delta);
-        }
-      }
-    },
-  };
-}
-
-/** Nudges the sibling the surrounding text named; a no-op when there is none. */
-function siblingRel(delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      const sibling = firstSibling(ctx.state.people);
-      if (sibling) sibling.rel = clampRel(sibling.rel + delta);
-    },
-  };
-}
-
-/** A plausible full name for the character's country, with a safe fallback. */
-function rollName(ctx: EffectCtx, gender: Gender): string {
-  // Widened like every other registry lookup: a partial registry can miss the key.
-  const pools: Record<string, NamePool | undefined> = ctx.reg.namePools;
-  const pool = pools[ctx.state.character.countryId];
-  const given = gender === 'female' ? pool?.female : pool?.male;
-  const first = given && given.length > 0 ? ctx.rng.pick(given) : 'Alex';
-  const last = pool && pool.last.length > 0 ? ctx.rng.pick(pool.last) : 'Doe';
-  return `${first} ${last}`;
-}
 
 /** Mints a friend of roughly the character's own age. */
 function addFriend(): Effect {
   return {
     kind: 'fn',
     run: (ctx: EffectCtx) => {
-      const gender = ctx.rng.pick(GENDERS);
+      const gender = ctx.rng.pick(ROLLED_GENDERS);
       addPerson(ctx.state, {
         kind: 'friend',
         name: rollName(ctx, gender),
@@ -321,6 +251,7 @@ const events: EventDef[] = [
     minAge: 3,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text: 'Your grandmother visited with a tin of biscuits and a folded note with money in it.',
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 6 },
@@ -335,6 +266,7 @@ const events: EventDef[] = [
     minAge: 4,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text: (ctx) =>
       `Nine hours in the back seat to ${ctx.rng.pick([
         'the coast',
@@ -369,6 +301,7 @@ const events: EventDef[] = [
     minAge: 4,
     maxAge: 12,
     weight: 5,
+    condition: free,
     text: 'Your birthday is Saturday and you get to decide what it looks like.',
     choices: [
       {
@@ -618,6 +551,7 @@ const events: EventDef[] = [
     minAge: 5,
     maxAge: 12,
     weight: 3,
+    condition: free,
     text: (ctx) =>
       `The goldfish you won at the fair did not make it to spring. ${ctx.rng.pick([
         'Bubbles',
@@ -650,7 +584,7 @@ const events: EventDef[] = [
     minAge: 5,
     maxAge: 12,
     weight: 4,
-    condition: hasSibling,
+    condition: (ctx) => free(ctx) && hasSibling(ctx),
     text: (ctx) =>
       `You broke the good vase in the hall. ${siblingName(ctx)} is the only other person home.`,
     choices: [
@@ -808,6 +742,7 @@ const events: EventDef[] = [
     minAge: 5,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text: 'A moving truck pulled up next door. There is a kid your age carrying a box of comics.',
     choices: [
       {
@@ -934,6 +869,7 @@ const events: EventDef[] = [
     minAge: 6,
     maxAge: 12,
     weight: 5,
+    condition: free,
     text: 'There is a chore chart on the fridge with your name on it and an allowance attached.',
     choices: [
       {
@@ -1010,6 +946,7 @@ const events: EventDef[] = [
     minAge: 6,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text:
       'You set up a folding table at the end of the driveway with a jug of lemonade and a sign.',
     choices: [
@@ -1068,6 +1005,7 @@ const events: EventDef[] = [
     minAge: 6,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text: 'There is a tree at the end of the road that everyone says nobody can climb.',
     choices: [
       {
@@ -1112,6 +1050,7 @@ const events: EventDef[] = [
     minAge: 6,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text: 'You cracked open the piggy bank and counted everything twice, out loud.',
     effects: [
       { kind: 'money', delta: 40 },
@@ -1191,6 +1130,7 @@ const events: EventDef[] = [
     minAge: 7,
     maxAge: 12,
     weight: 4,
+    condition: free,
     text: "Sleepover at a friend's house. At 3am you were arguing about who was more tired.",
     effects: [
       { kind: 'stat', stat: 'happiness', delta: 7 },

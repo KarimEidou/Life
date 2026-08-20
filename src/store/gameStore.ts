@@ -4,7 +4,9 @@
  * Implementation contract for every mutating action — the engine mutates
  * `GameState` in place, so each action must re-spread the game object into
  * `set()` for React to see the change, autosave the slot via `saveGame`, and
- * run `evaluateAchievements`, pushing a toast for each newly unlocked id.
+ * run `evaluateAchievements`, pushing a toast for each newly unlocked id. That
+ * contract is `commit`, and `withLife` is how an ordinary action reaches it:
+ * guard, engine call, commit, written once rather than once per action.
  *
  * Because only the top-level `game` object gets a fresh identity per commit
  * (nested objects are mutated in place), components must subscribe to the
@@ -19,6 +21,7 @@ import type { BlackjackTable, LotteryResult, SlotsResult } from '@/content/gambl
 import { evaluateAchievements } from '@/engine/achievements';
 import { ageUp as engineAgeUp, resolveChoice } from '@/engine/ageUp';
 import { startLegacy as engineStartLegacy } from '@/engine/death';
+import { fmtMoney } from '@/engine/format';
 import { commitCrime, runInteraction } from '@/engine/interactions';
 import * as career from '@/engine/phases/career';
 import * as education from '@/engine/phases/education';
@@ -32,18 +35,59 @@ import {
   memoryStorage,
   saveGame,
   saveUnlockedAchievements,
+  slotKey,
+  tableKey,
 } from '@/engine/save';
-import type { LoadResult, StorageAdapter } from '@/engine/save';
-import { createLife, emigrateTo } from '@/engine/state';
+import type { LoadFailure, LoadResult, SlotRow, StorageAdapter } from '@/engine/save';
+import { createLife, emigrateTo, LIFE_OVER, lifeIsOver } from '@/engine/state';
 import { useUiStore } from '@/store/uiStore';
 import type {
   AchievementDef,
+  ContentRegistry,
   GameState,
   Gender,
   Investments,
   PendingEvent,
-  SlotSummary,
 } from '@/types';
+
+/**
+ * What `loadSlot` answers: the loader's own verdict on the read it just made.
+ *
+ * The reason travels with the refusal so the load menu can word it without
+ * parsing the slot a second time — a second read is both the wasted work of
+ * re-parsing a whole life and a chance for the two answers to disagree.
+ * `repairs`, when present, names the fields the loader had to fill in, so a
+ * recovered life can say so instead of resuming as if nothing had happened.
+ */
+export type SlotLoadResult = { ok: true; repairs?: string[] } | { ok: false; reason: LoadFailure };
+
+/**
+ * What a mutating action answers: an outcome a sheet can put straight in a
+ * toast, refusals included.
+ *
+ * The refusal carries prose rather than a code because the refusal is decided
+ * here, and it has to be decided somewhere only one layer knows: a sheet that
+ * infers "was that allowed?" from the state afterwards, or that re-types a
+ * threshold the engine owns, is one engine change away from telling the player
+ * something that is no longer true. `text` is the headline a success carries
+ * when the engine wrote one worth repeating.
+ */
+export type ActionResult = { ok: true; text?: string } | { ok: false; reason: string };
+
+/** The same answer, carrying whatever the action produced on the way. */
+export type ActionResultWith<T> = { ok: true; result: T } | { ok: false; reason: string };
+
+/**
+ * What an activity or a crime narrates back.
+ *
+ * A headline, not a verdict — it is what happened, and it is shown whether the
+ * attempt went well or badly — which is why these two actions are the ones that
+ * do not answer in `ActionResult`.
+ */
+export interface Headline {
+  text: string;
+  icon: string;
+}
 
 /** What the create-a-life screen collects; unset fields are rolled from the seed. */
 export interface NewLifeOptions {
@@ -55,47 +99,55 @@ export interface NewLifeOptions {
   countryId?: string;
 }
 
+/**
+ * Two answer shapes, and no third one: `ActionResult` for anything the player
+ * asks the life to do — so every button can say what happened, including the
+ * ones whose engine call is a no-op — and `Headline` for the two actions that
+ * narrate rather than decide. The few that pass an engine's own `{ ok, reason? }`
+ * straight through keep that shape, which `ActionResult` is the narrowing of.
+ */
 interface GameStore {
   game: GameState | null;
   slot: number | null;
   unlocked: string[];
   casino: BlackjackTable | null;
 
+  beginNewLife(slot: number): void;
   newLife(opts: NewLifeOptions): void;
-  loadSlot(slot: number): boolean;
+  loadSlot(slot: number): SlotLoadResult;
   deleteSlot(slot: number): void;
-  slotSummaries(): SlotSummary[];
+  slotSummaries(): SlotRow[];
 
   ageUp(): void;
   choose(index: number): void;
 
-  interact(id: string, targetId?: string): { text: string; icon: string } | null;
-  crime(crimeId: string): { text: string; icon: string } | null;
+  interact(id: string, targetId?: string): Headline | null;
+  crime(crimeId: string): Headline | null;
 
   applyForJob(jobId: string): { ok: boolean; reason?: string };
-  quitJob(): void;
-  setWorkHard(on: boolean): void;
-  askForRaise(): { ok: boolean; text: string };
+  quitJob(): ActionResult;
+  setWorkHard(on: boolean): ActionResult;
+  askForRaise(): ActionResult;
 
   applyToSchool(schoolId: string, major?: string): { ok: boolean; reason?: string };
-  dropOut(): void;
-  setStudyHard(on: boolean): void;
+  dropOut(): ActionResult;
+  setStudyHard(on: boolean): ActionResult;
 
   buyAsset(defId: string, withLoan?: boolean): { ok: boolean; reason?: string };
-  sellAsset(assetId: string): void;
-  deposit(kind: keyof Investments, amount: number): boolean;
-  withdraw(kind: keyof Investments, amount: number): boolean;
+  sellAsset(assetId: string): ActionResult;
+  deposit(kind: keyof Investments, amount: number): ActionResult;
+  withdraw(kind: keyof Investments, amount: number): ActionResult;
   takeLoan(amount: number): { ok: boolean; reason?: string };
-  repayLoan(loanId: string, amount: number): void;
+  repayLoan(loanId: string, amount: number): ActionResult;
 
   emigrate(countryId: string): { ok: boolean; reason?: string; text?: string };
 
-  startBlackjack(bet: number): void;
+  startBlackjack(bet: number): ActionResult;
   blackjackHit(): void;
   blackjackStand(): void;
   clearCasino(): void;
-  spinSlots(bet: number): SlotsResult | null;
-  buyLottery(): LotteryResult | null;
+  spinSlots(bet: number): ActionResultWith<SlotsResult>;
+  buyLottery(): ActionResultWith<LotteryResult>;
 
   startLegacy(childId: string): void;
   abandonLife(): void;
@@ -129,11 +181,14 @@ function readUnlocked(): string[] {
 /* An unfinished blackjack hand is app-layer state, not part of the engine's
    save envelope — but its stake is already charged and autosaved, so the
    table rides in a sidecar key and is restored on load instead of being
-   silently forfeited by a mid-hand reload. */
-function tableKey(slot: number): string {
-  return `ol.table.${String(slot)}`;
-}
+   silently forfeited by a mid-hand reload. `save.ts` owns the key name, as it
+   owns every other `ol.*` name; only the reading and writing live here, where
+   `BlackjackTable` is a type the layer is allowed to know.
 
+   `commit` is what calls this for a table a life still holds, so `casino` and
+   the key are decided by one expression and cannot drift; the three callers
+   outside it (`newLife`, `startLegacy`, `clearCasino`) are the ones erasing a
+   hand no life in memory holds any more. */
 function writeTableSidecar(slot: number | null, table: BlackjackTable | null): void {
   if (slot === null) {
     return;
@@ -204,11 +259,25 @@ function readTableSidecar(slot: number): BlackjackTable | null {
   }
 }
 
-/* `saveGame` owns this key; the store spells it out too because the ownership
-   check below needs one slot's envelope stamp, and the only exported reader of
-   it is `listSlots`, which parses all six saves. */
-function saveKey(slot: number): string {
-  return `ol.save.${String(slot)}`;
+/**
+ * The table a life in this phase may still hold — the one decision `casino` and
+ * its sidecar are both made from.
+ *
+ * A finished life is closed to play: `gambling` refuses to deal, hit or stand on
+ * one, and the casino sheet is unreachable from the death screen. So a hand
+ * still open when the character dies can never reach the settlement that pays
+ * anything back; left as it is, it sits in `casino` and in the slot for good,
+ * holding a stake charged out of a balance nothing will ever return it to.
+ * Folding closes the table and hands that stake back — no card drawn, so no
+ * later roll moves. A table that is already finished is inert and comes back
+ * untouched, which is what keeps a refused deal on a dead life exactly as
+ * cheap as it is on a living one, and one stake from being refunded twice.
+ */
+function tableForPhase(game: GameState, table: BlackjackTable | null): BlackjackTable | null {
+  if (table === null || table.done || game.phase !== 'dead') {
+    return table;
+  }
+  return gambling.foldBlackjack(game, table);
 }
 
 /**
@@ -235,10 +304,16 @@ function claimSlot(slot: number): void {
   slotTakenOver = false;
 }
 
-/** The stamp `ol.save.<slot>` carries now; 0 when it holds nothing readable. */
+/**
+ * The stamp `ol.save.<slot>` carries now; 0 when it holds nothing readable.
+ *
+ * Read through `save.ts`'s own key rather than a second spelling of it, and
+ * read shallowly rather than through `listSlots`, which parses all six saves to
+ * answer a question about one.
+ */
 function storedSavedAt(slot: number): number {
   try {
-    const raw = storage.getItem(saveKey(slot));
+    const raw = storage.getItem(slotKey(slot));
     if (raw === null) {
       return 0;
     }
@@ -266,6 +341,20 @@ function slotWrittenElsewhere(slot: number): boolean {
   }
   return storedSavedAt(slot) > slotOwnedAt.at;
 }
+
+/**
+ * Whether the slot's writes are being refused, and so whether the player has
+ * already been told that the game is no longer being saved.
+ *
+ * A storage that throws — a full origin, or one where site data is blocked
+ * mid-session — must not stop play: the life in memory carries on exactly as it
+ * did, which is why every write here is wrapped. But that is also the one
+ * failure the player cannot see, and it costs them the whole session on reload.
+ * So it is said the once, at the moment the guarantee breaks, and said again
+ * only after a write has landed in between; a toast a year would drown the game
+ * and would say nothing new.
+ */
+let autosaveBroken = false;
 
 /**
  * Reopens a life parked on `awaitingChoice` with no card to answer; true when
@@ -296,6 +385,127 @@ function repairStalledChoice(game: GameState): boolean {
   return true;
 }
 
+/** What every action answers a caller with no life loaded to run it on. */
+const NO_LIFE = 'No life loaded.';
+
+/**
+ * The bet limits `content/gambling` enforces without exporting them.
+ *
+ * The refusals are worded here, so the wording has to know the number the table
+ * refuses on — the alternative is what these replace: a sheet reading the
+ * engine's refusal sentinel back out of the store and writing its own prose
+ * around it, three layers from the rule. `gameStore.test.ts` plays each limit's
+ * first accepted and first refused bet through the engine itself, so a limit
+ * that moves there fails a test here rather than mis-wording a toast.
+ */
+const MIN_BLACKJACK_BET = 10;
+const MIN_SLOT_BET = 5;
+const MAX_SLOT_BET = 1000;
+
+/** A stake as the tables read one: whole dollars, and junk is worth nothing. */
+function wholeBet(bet: number): number {
+  return Number.isFinite(bet) ? Math.floor(bet) : 0;
+}
+
+/** What the character can put on a table; an unreadable balance buys nothing. */
+function bankroll(game: GameState): number {
+  const held = game.character.money;
+  return Number.isFinite(held) ? held : 0;
+}
+
+/**
+ * Why a table would refuse this stake, or null when it would take it.
+ *
+ * Asked before the engine is called, never after. Every game in `gambling`
+ * refuses for free — nothing charged, nothing drawn, nothing logged — so a
+ * refusal decided here leaves exactly the state a refusal there would have
+ * left, and the player is told the rule instead of being handed an inert table
+ * or three blocked reels to interpret.
+ */
+function betRefusal(game: GameState, stake: number, min: number, max?: number): string | null {
+  if (lifeIsOver(game)) {
+    return LIFE_OVER;
+  }
+  if (stake < min) {
+    return `The minimum bet is ${fmtMoney(min)}.`;
+  }
+  if (max !== undefined && stake > max) {
+    return `The most you can bet is ${fmtMoney(max)}.`;
+  }
+  if (stake > bankroll(game)) {
+    return "You can't cover that bet.";
+  }
+  return null;
+}
+
+/**
+ * Why an action against the job would do nothing, or null when it will.
+ *
+ * These read the same predicate the engine guards on, before it runs, because
+ * the engine answers a refused `quitJob` or `setWorkHard` with nothing at all:
+ * the store cannot ask afterwards whether anything happened, and a button that
+ * silently does nothing is the one outcome the player cannot tell from a bug.
+ */
+function jobRefusal(game: GameState): string | null {
+  if (lifeIsOver(game)) {
+    return LIFE_OVER;
+  }
+  /* The engine's own falsy test rather than a `=== null` narrowing of it: a
+     drifted save can hold nothing at all here, and both must refuse alike. */
+  return game.character.job ? null : "You don't have a job.";
+}
+
+/** Why an action against a desk would do nothing, or null when it will. */
+function enrolmentRefusal(game: GameState): string | null {
+  if (lifeIsOver(game)) {
+    return LIFE_OVER;
+  }
+  return game.character.education.enrolledIn === undefined ? "You're not enrolled." : null;
+}
+
+/** Why the sale would do nothing, or null when the asset is there to sell. */
+function saleRefusal(game: GameState, assetId: string): string | null {
+  if (lifeIsOver(game)) {
+    return LIFE_OVER;
+  }
+  const owned = game.character.assets.some((held) => held.id === assetId);
+  return owned ? null : "You don't own that.";
+}
+
+/**
+ * Why the repayment would move nothing, or null when it will.
+ *
+ * The same arithmetic `finance.repayLoan` refuses on: the payment is capped by
+ * the cash on hand and by what is left of the loan, so a tap with an empty
+ * wallet moves zero dollars and writes no line.
+ */
+function repaymentRefusal(game: GameState, loanId: string, amount: number): string | null {
+  if (lifeIsOver(game)) {
+    return LIFE_OVER;
+  }
+  const c = game.character;
+  const loan = c.loans.find((held) => held.id === loanId);
+  if (loan === undefined) {
+    return "You don't owe that.";
+  }
+  return Math.round(Math.min(amount, c.money, loan.principal)) > 0 ? null : 'Nothing to pay with.';
+}
+
+/**
+ * Why the investment move was refused, read after the engine has answered it.
+ *
+ * Safe in that order, unlike the ones above: a refused move writes nothing, so
+ * the balances read here are the ones the engine read. Only the caller knows
+ * which side of the move ran out, so it names that one cause.
+ */
+function moveRefusal(game: GameState, amount: number, tooMuch: string): string {
+  if (lifeIsOver(game)) {
+    return LIFE_OVER;
+  }
+  const moved = Math.round(amount);
+  return Number.isFinite(moved) && moved > 0 ? tooMuch : 'Enter an amount to move.';
+}
+
 /** Sends the UI wherever the life's phase demands after a mutation. */
 function routePhase(game: GameState): void {
   const ui = useUiStore.getState();
@@ -304,30 +514,27 @@ function routePhase(game: GameState): void {
     ui.setScreen('death');
     return;
   }
-  if (game.phase === 'awaitingChoice') {
-    if (!ui.sheets.some((s) => s.id === 'event')) {
-      ui.pushSheet('event');
-    }
-    return;
-  }
-  // Back to plain living: drop any event sheet this router itself put up.
-  for (;;) {
-    const { sheets, popSheet } = useUiStore.getState();
-    const top = sheets[sheets.length - 1];
-    if (top === undefined || top.id !== 'event') {
-      break;
-    }
-    popSheet();
-  }
+  /* Both directions out of one expression: the event sheet is up exactly while
+     a card is waiting. Split into an opening rule and a closing one, the two
+     can disagree about where that sheet may sit, and an entry left under
+     another sheet is then neither answerable nor clearable — `setEventSheet`
+     is where that whole rule lives. */
+  ui.setEventSheet(game.phase === 'awaitingChoice');
 }
 
 export const useGameStore = create<GameStore>()((set, get) => {
-  /** The funnel every mutating action ends in: sweeps achievements against the
-      cross-life list, autosaves the loaded slot, re-spreads the game object so
-      React sees the in-place mutation, then routes the UI on the phase. */
+  /** The funnel every mutating action ends in: settles the blackjack table
+      against the life's phase, sweeps achievements against the cross-life list,
+      autosaves the loaded slot, re-spreads the game object so React sees the
+      in-place mutation, then routes the UI on the phase. */
   const commit = (game: GameState, extra?: { casino: BlackjackTable | null }): void => {
     const reg = getRegistry();
-    const { slot, unlocked } = get();
+    const { slot, unlocked, casino: heldTable } = get();
+
+    /* Settled first, ahead of the sweep and the write below, because folding
+       pays a stake back into `game`: decided after them, the refund would miss
+       both the achievement it might unlock and the save the player reloads. */
+    const table = tableForPhase(game, extra === undefined ? heldTable : extra.casino);
 
     const fresh = evaluateAchievements(game, reg, unlocked);
     let nextUnlocked = unlocked;
@@ -369,14 +576,59 @@ export const useGameStore = create<GameStore>()((set, get) => {
         try {
           saveGame(storage, slot, game);
           claimSlot(slot);
+          // A write that landed makes the next break news again.
+          autosaveBroken = false;
         } catch {
-          // The autosave is lost but play continues.
+          /* The autosave is lost but play continues — and the player is told
+             that it is, once per episode, because nothing else in the game
+             shows it. */
+          if (!autosaveBroken) {
+            autosaveBroken = true;
+            useUiStore.getState().addToast({
+              icon: '⚠️',
+              title: 'Progress is not being saved',
+              subtitle: 'Storage is full or unavailable.',
+            });
+          }
         }
       }
     }
 
-    set({ game: { ...game }, unlocked: nextUnlocked, ...extra });
+    set({ game: { ...game }, unlocked: nextUnlocked, casino: table });
+    /* The key follows the table it mirrors, once per change rather than once
+       per gambling action, and after the ownership check above — whose verdict
+       is exactly what `writeTableSidecar` reads before it writes. */
+    if (table !== heldTable) {
+      writeTableSidecar(slot, table);
+    }
     routePhase(game);
+  };
+
+  /**
+   * The shape an ordinary mutating action has: run `fn` against the loaded life
+   * and commit it, or answer `absent` when there is no life to run it on.
+   *
+   * Only one half of that pair can be left out silently. An action that skips
+   * `commit` still mutates `GameState` in place, so it plays out in the engine
+   * and leaves both React and the autosave behind the life it just changed —
+   * nothing in the types can see the omission, and the game looks fine until a
+   * reload. Written here it cannot be omitted, and the actions that keep a body
+   * of their own are then exactly the ones that genuinely differ: `ageUp`'s
+   * phase guard, `choose`'s card guards, the blackjack trio's table argument,
+   * `startLegacy`'s fresh state, and the ones that need no life loaded at all.
+   *
+   * `getRegistry()` is passed to every `fn`, including the ones that ignore it:
+   * it is the same cached build `commit` reads a line later, so an action that
+   * does not need it pays nothing for being handed it.
+   */
+  const withLife = <T>(absent: T, fn: (game: GameState, reg: ContentRegistry) => T): T => {
+    const game = get().game;
+    if (game === null) {
+      return absent;
+    }
+    const out = fn(game, getRegistry());
+    commit(game);
+    return out;
   };
 
   return {
@@ -384,6 +636,22 @@ export const useGameStore = create<GameStore>()((set, get) => {
     slot: null,
     unlocked: readUnlocked(),
     casino: null,
+
+    /**
+     * Arms the create screen: the chosen slot becomes the pending one the next
+     * `newLife` writes into, and whatever life is in memory is let go of.
+     *
+     * `slot` held with no `game` beside it is the one state where those two
+     * disagree, and it is the whole protocol between the two screens — the load
+     * menu names the slot, the create screen reads it back and hands it to
+     * `newLife`. Written here, beside the action that reads it, rather than as
+     * a `set` from the screen that starts it. Nothing on disk moves: the life
+     * being let go of keeps its save in its own slot, and its blackjack hand
+     * beside it, exactly as `abandonLife` leaves both.
+     */
+    beginNewLife: (slot: number): void => {
+      set({ slot, game: null, casino: null });
+    },
 
     /** Creates a character in the given slot and switches to the life screen. */
     newLife: (opts: NewLifeOptions): void => {
@@ -404,16 +672,20 @@ export const useGameStore = create<GameStore>()((set, get) => {
       useUiStore.getState().setScreen('life');
     },
 
-    /** Loads a slot into the store; false when the slot is empty or unreadable. */
-    loadSlot: (slot: number): boolean => {
+    /** Loads a slot into the store, reporting why when the slot will not open. */
+    loadSlot: (slot: number): SlotLoadResult => {
       let result: LoadResult;
       try {
         result = loadGame(storage, slot);
       } catch {
-        return false;
+        /* A read that threw says nothing about the payload — it may well still
+           be there, unread — so this is `corrupt` rather than `empty`: what
+           failed is the reading, and a slot the player has a life in must never
+           report itself as free space. */
+        return { ok: false, reason: 'corrupt' };
       }
       if (!result.ok) {
-        return false;
+        return { ok: false, reason: result.reason };
       }
       /* Repaired before the state is adopted, not from inside `routePhase`:
          `commit` spreads the game object before routing, so a mutation made
@@ -426,24 +698,26 @@ export const useGameStore = create<GameStore>()((set, get) => {
       ui.closeAllSheets();
       ui.setScreen('life');
       routePhase(result.state);
-      return true;
+      /* Absent rather than empty, exactly as `loadGame` reports it: presence is
+         the whole test, so a save that needed nothing says nothing. */
+      return result.repairs === undefined ? { ok: true } : { ok: true, repairs: result.repairs };
     },
 
     /** Erases a slot, clearing the store when that slot is the one loaded. */
     deleteSlot: (slot: number): void => {
       try {
+        // The whole slot, sidecar included: `deleteSave` erases both keys.
         deleteSave(storage, slot);
       } catch {
         // Nothing readable to erase.
       }
-      writeTableSidecar(slot, null);
       if (get().slot === slot) {
         set({ game: null, slot: null, casino: null });
       }
     },
 
-    /** Slot descriptions for the load menu. */
-    slotSummaries: (): SlotSummary[] => {
+    /** Slot descriptions for the load menu, damaged and future ones flagged. */
+    slotSummaries: (): SlotRow[] => {
       return listSlots(storage);
     },
 
@@ -495,175 +769,145 @@ export const useGameStore = create<GameStore>()((set, get) => {
     },
 
     /** Runs an activity or relationship action; returns its headline for the UI. */
-    interact: (id: string, targetId?: string): { text: string; icon: string } | null => {
-      const game = get().game;
-      if (game === null) {
-        return null;
-      }
-      const result = runInteraction(game, getRegistry(), id, targetId);
-      commit(game);
+    interact: (id: string, targetId?: string): Headline | null => {
+      /* Narrowed to the headline after the commit, not inside `fn`: what the UI
+         shows is a read of the result, and keeping it out here leaves the
+         commit in the one position every other action puts it. */
+      const result = withLife(null, (g, reg) => runInteraction(g, reg, id, targetId));
       return result === null ? null : { text: result.text, icon: result.icon };
     },
 
     /** Commits a crime; returns its headline for the UI. */
-    crime: (crimeId: string): { text: string; icon: string } | null => {
-      const game = get().game;
-      if (game === null) {
-        return null;
-      }
-      const result = commitCrime(game, getRegistry(), crimeId);
-      commit(game);
-      return { text: result.text, icon: result.icon };
+    crime: (crimeId: string): Headline | null => {
+      const result = withLife<Headline | null>(null, (g, reg) => commitCrime(g, reg, crimeId));
+      return result === null ? null : { text: result.text, icon: result.icon };
     },
 
-    applyForJob: (jobId: string): { ok: boolean; reason?: string } => {
-      const game = get().game;
-      if (game === null) {
-        return { ok: false, reason: 'No life loaded.' };
-      }
-      const result = career.applyForJob(game, getRegistry(), jobId);
-      commit(game);
-      return result;
-    },
+    applyForJob: (jobId: string): { ok: boolean; reason?: string } =>
+      withLife({ ok: false, reason: NO_LIFE }, (g, reg) => career.applyForJob(g, reg, jobId)),
 
-    quitJob: (): void => {
-      const game = get().game;
-      if (game === null) {
-        return;
-      }
-      career.quitJob(game);
-      commit(game);
-    },
+    quitJob: (): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) => {
+        /* Refused inside the callback rather than ahead of it, so the refusal
+           still ends in the commit every `withLife` action ends in: nothing
+           about a refusal argues for skipping it, and an action that quietly
+           stopped flushing the life is the one bug no type can catch. */
+        const refusal = jobRefusal(g);
+        if (refusal !== null) {
+          return { ok: false, reason: refusal };
+        }
+        career.quitJob(g);
+        return { ok: true };
+      }),
 
-    setWorkHard: (on: boolean): void => {
-      const game = get().game;
-      if (game === null) {
-        return;
-      }
-      career.setWorkHard(game, on);
-      commit(game);
-    },
+    setWorkHard: (on: boolean): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) => {
+        const refusal = jobRefusal(g);
+        if (refusal !== null) {
+          return { ok: false, reason: refusal };
+        }
+        career.setWorkHard(g, on);
+        return { ok: true };
+      }),
 
-    askForRaise: (): { ok: boolean; text: string } => {
-      const game = get().game;
-      if (game === null) {
-        return { ok: false, text: 'No life loaded.' };
-      }
-      const result = career.askForRaise(game, getRegistry());
-      commit(game);
-      return result;
-    },
+    /* The engine's own prose either way, under the field name every other
+       action uses for it: the sheet reads one shape, not two. */
+    askForRaise: (): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g, reg) => {
+        const asked = career.askForRaise(g, reg);
+        return asked.ok ? { ok: true, text: asked.text } : { ok: false, reason: asked.text };
+      }),
 
-    applyToSchool: (schoolId: string, major?: string): { ok: boolean; reason?: string } => {
-      const game = get().game;
-      if (game === null) {
-        return { ok: false, reason: 'No life loaded.' };
-      }
-      const result = education.applyToSchool(game, getRegistry(), schoolId, major);
-      commit(game);
-      return result;
-    },
+    applyToSchool: (schoolId: string, major?: string): { ok: boolean; reason?: string } =>
+      withLife({ ok: false, reason: NO_LIFE }, (g, reg) =>
+        education.applyToSchool(g, reg, schoolId, major)
+      ),
 
-    dropOut: (): void => {
-      const game = get().game;
-      if (game === null) {
-        return;
-      }
-      education.dropOut(game);
-      commit(game);
-    },
+    dropOut: (): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) => {
+        const refusal = enrolmentRefusal(g);
+        if (refusal !== null) {
+          return { ok: false, reason: refusal };
+        }
+        education.dropOut(g);
+        return { ok: true };
+      }),
 
-    setStudyHard: (on: boolean): void => {
-      const game = get().game;
-      if (game === null) {
-        return;
-      }
-      education.setStudyHard(game, on);
-      commit(game);
-    },
+    setStudyHard: (on: boolean): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) => {
+        if (lifeIsOver(g)) {
+          return { ok: false, reason: LIFE_OVER };
+        }
+        education.setStudyHard(g, on);
+        return { ok: true };
+      }),
 
-    buyAsset: (defId: string, withLoan?: boolean): { ok: boolean; reason?: string } => {
-      const game = get().game;
-      if (game === null) {
-        return { ok: false, reason: 'No life loaded.' };
-      }
-      const result = finance.buyAsset(game, getRegistry(), defId, withLoan);
-      commit(game);
-      return result;
-    },
+    buyAsset: (defId: string, withLoan?: boolean): { ok: boolean; reason?: string } =>
+      withLife({ ok: false, reason: NO_LIFE }, (g, reg) =>
+        finance.buyAsset(g, reg, defId, withLoan)
+      ),
 
-    sellAsset: (assetId: string): void => {
-      const game = get().game;
-      if (game === null) {
-        return;
-      }
-      finance.sellAsset(game, assetId);
-      commit(game);
-    },
+    sellAsset: (assetId: string): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) => {
+        const refusal = saleRefusal(g, assetId);
+        if (refusal !== null) {
+          return { ok: false, reason: refusal };
+        }
+        finance.sellAsset(g, assetId);
+        return { ok: true };
+      }),
 
-    deposit: (kind: keyof Investments, amount: number): boolean => {
-      const game = get().game;
-      if (game === null) {
-        return false;
-      }
-      const ok = finance.depositInvestment(game, kind, amount);
-      commit(game);
-      return ok;
-    },
+    deposit: (kind: keyof Investments, amount: number): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) =>
+        finance.depositInvestment(g, kind, amount)
+          ? { ok: true }
+          : { ok: false, reason: moveRefusal(g, amount, "You don't have that much.") }
+      ),
 
-    withdraw: (kind: keyof Investments, amount: number): boolean => {
-      const game = get().game;
-      if (game === null) {
-        return false;
-      }
-      const ok = finance.withdrawInvestment(game, kind, amount);
-      commit(game);
-      return ok;
-    },
+    withdraw: (kind: keyof Investments, amount: number): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) =>
+        finance.withdrawInvestment(g, kind, amount)
+          ? { ok: true }
+          : { ok: false, reason: moveRefusal(g, amount, 'Not that much invested.') }
+      ),
 
-    takeLoan: (amount: number): { ok: boolean; reason?: string } => {
-      const game = get().game;
-      if (game === null) {
-        return { ok: false, reason: 'No life loaded.' };
-      }
-      const result = finance.takeLoan(game, getRegistry(), amount);
-      commit(game);
-      return result;
-    },
+    takeLoan: (amount: number): { ok: boolean; reason?: string } =>
+      withLife({ ok: false, reason: NO_LIFE }, (g, reg) => finance.takeLoan(g, reg, amount)),
 
-    repayLoan: (loanId: string, amount: number): void => {
-      const game = get().game;
-      if (game === null) {
-        return;
-      }
-      finance.repayLoan(game, loanId, amount);
-      commit(game);
-    },
+    repayLoan: (loanId: string, amount: number): ActionResult =>
+      withLife<ActionResult>({ ok: false, reason: NO_LIFE }, (g) => {
+        const refusal = repaymentRefusal(g, loanId, amount);
+        if (refusal !== null) {
+          return { ok: false, reason: refusal };
+        }
+        finance.repayLoan(g, loanId, amount);
+        return { ok: true };
+      }),
 
-    emigrate: (countryId: string): { ok: boolean; reason?: string; text?: string } => {
-      const game = get().game;
-      if (game === null) {
-        return { ok: false, reason: 'No life loaded.' };
-      }
-      // A denied application still charges the fee and logs, so commit either way.
-      const result = emigrateTo(game, getRegistry(), countryId);
-      commit(game);
-      return result;
-    },
+    // A denied application still charges the fee and logs, so commit either way.
+    emigrate: (countryId: string): { ok: boolean; reason?: string; text?: string } =>
+      withLife({ ok: false, reason: NO_LIFE }, (g, reg) => emigrateTo(g, reg, countryId)),
 
     /** Deals a hand and holds the table in `casino` until it is cleared. */
-    startBlackjack: (bet: number): void => {
+    startBlackjack: (bet: number): ActionResult => {
       const { game, casino } = get();
       if (game === null) {
-        return;
+        return { ok: false, reason: NO_LIFE };
       }
       // Dealing over an unfinished hand would silently forfeit its stake.
       if (casino !== null && !casino.done) {
-        return;
+        return { ok: false, reason: 'Finish the hand you are playing.' };
+      }
+      const refusal = betRefusal(game, wholeBet(bet), MIN_BLACKJACK_BET);
+      if (refusal !== null) {
+        /* No engine call, so no commit either: a refused deal moves nothing,
+           and the table it used to park in `casino` was only ever there for the
+           casino sheet to recognise as a refusal and hide. */
+        return { ok: false, reason: refusal };
       }
       const table = gambling.startBlackjack(game, getRegistry(), bet);
       commit(game, { casino: table });
-      writeTableSidecar(get().slot, table);
+      return { ok: true };
     },
 
     blackjackHit: (): void => {
@@ -673,7 +917,6 @@ export const useGameStore = create<GameStore>()((set, get) => {
       }
       const table = gambling.blackjackHit(game, casino);
       commit(game, { casino: table });
-      writeTableSidecar(get().slot, table);
     },
 
     blackjackStand: (): void => {
@@ -683,7 +926,6 @@ export const useGameStore = create<GameStore>()((set, get) => {
       }
       const table = gambling.blackjackStand(game, casino);
       commit(game, { casino: table });
-      writeTableSidecar(get().slot, table);
     },
 
     /** Drops the finished table so the casino sheet returns to its menu. */
@@ -692,25 +934,27 @@ export const useGameStore = create<GameStore>()((set, get) => {
       set({ casino: null });
     },
 
-    spinSlots: (bet: number): SlotsResult | null => {
-      const game = get().game;
-      if (game === null) {
-        return null;
-      }
-      const result = gambling.spinSlots(game, getRegistry(), bet);
-      commit(game);
-      return result;
-    },
+    spinSlots: (bet: number): ActionResultWith<SlotsResult> =>
+      withLife<ActionResultWith<SlotsResult>>({ ok: false, reason: NO_LIFE }, (g, reg) => {
+        const refusal = betRefusal(g, wholeBet(bet), MIN_SLOT_BET, MAX_SLOT_BET);
+        return refusal !== null
+          ? { ok: false, reason: refusal }
+          : { ok: true, result: gambling.spinSlots(g, reg, bet) };
+      }),
 
-    buyLottery: (): LotteryResult | null => {
-      const game = get().game;
-      if (game === null) {
-        return null;
-      }
-      const result = gambling.buyLottery(game, getRegistry());
-      commit(game);
-      return result;
-    },
+    buyLottery: (): ActionResultWith<LotteryResult> =>
+      withLife<ActionResultWith<LotteryResult>>({ ok: false, reason: NO_LIFE }, (g, reg) => {
+        if (lifeIsOver(g)) {
+          return { ok: false, reason: LIFE_OVER };
+        }
+        /* The refusal a caller cannot otherwise see: a ticket nobody could
+           afford comes back from the engine looking exactly like a losing one,
+           which is what had the casino sheet re-checking the price itself. */
+        if (bankroll(g) < gambling.TICKET_PRICE) {
+          return { ok: false, reason: "You can't afford a ticket." };
+        }
+        return { ok: true, result: gambling.buyLottery(g, reg) };
+      }),
 
     /** Continues into the next generation as the chosen child. */
     startLegacy: (childId: string): void => {
@@ -722,7 +966,13 @@ export const useGameStore = create<GameStore>()((set, get) => {
       try {
         next = engineStartLegacy(game, getRegistry(), childId);
       } catch {
-        // The UI only offers living children; a stale id is ignored.
+        /* Caught rather than pre-guarded, and the only call in the file written
+           that way round: `engineStartLegacy` builds a fresh state and this
+           adopts it only on success, so a throw leaves the loaded life exactly
+           as it was. Where the engine mutates in place — `choose` above — the
+           guard has to come first instead, because a throw from there has
+           already half-applied the move to the live state. Either way, the UI
+           only offers living children and a stale id is ignored. */
         return;
       }
       writeTableSidecar(get().slot, null);
@@ -733,7 +983,14 @@ export const useGameStore = create<GameStore>()((set, get) => {
       ui.setScreen('life');
     },
 
-    /** Leaves the current life without continuing it and returns to the slot list. */
+    /**
+     * Leaves the current life without continuing it and returns to the slot list.
+     *
+     * The one place `casino` is dropped without its sidecar: the save stays
+     * exactly where it is, so a hand charged against that balance has to stay
+     * beside it and be dealt back the next time the slot is opened — the same
+     * way the balance itself survives. Erasing the slot is what erases both.
+     */
     abandonLife: (): void => {
       set({ game: null, slot: null, casino: null });
       const ui = useUiStore.getState();
@@ -758,23 +1015,18 @@ export const useGameStore = create<GameStore>()((set, get) => {
         saveGame(storage, slot, game);
         claimSlot(slot);
       } catch {
-        // The save is lost but play continues.
+        /* The save is lost but play continues. Counted as told without a toast
+           of its own: the caller reports this write's outcome itself, and one
+           tap must not raise two warnings about the same storage. */
+        autosaveBroken = true;
         return false;
       }
+      // A write that landed makes the autosave's next break news again.
+      autosaveBroken = false;
       return storagePersists;
     },
   };
 });
-
-/** Why a slot refuses to load, for UI copy; null when it would load fine. */
-export function slotLoadFailure(slot: number): 'empty' | 'corrupt' | 'future' | null {
-  try {
-    const result = loadGame(storage, slot);
-    return result.ok ? null : result.reason;
-  } catch {
-    return 'corrupt';
-  }
-}
 
 /** Swaps the storage adapter and clears any loaded life; tests only. */
 export function resetGameStoreForTests(adapter?: StorageAdapter): void {
@@ -785,5 +1037,6 @@ export function resetGameStoreForTests(adapter?: StorageAdapter): void {
   // A fresh page load: this window has written no slot yet.
   slotOwnedAt = null;
   slotTakenOver = false;
+  autosaveBroken = false;
   useGameStore.setState({ game: null, slot: null, casino: null, unlocked: readUnlocked() });
 }

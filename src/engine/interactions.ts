@@ -5,11 +5,13 @@
  * `YearLog`, so the feed reads as one continuous year.
  */
 
-import { currentYearLog } from '@/engine/ageUp';
-import { killCharacter } from '@/engine/death';
+import { settleDeath } from '@/engine/death';
 import { applyEffects, clampMoney, personById } from '@/engine/effects';
 import { fillTemplate, fmtMoney } from '@/engine/format';
+import { currentYearLog } from '@/engine/log';
+import { findById } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
+import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
   ContentRegistry,
   CrimeDef,
@@ -27,27 +29,18 @@ const DEFAULT_MAX_AGE = 200;
 /** Shown on any action the character was not allowed to take. */
 const BLOCKED_ICON = '🚫';
 
-/** Refusal handed to every player action once the life has ended. */
-const LIFE_OVER = 'Your life is over.';
-
 /** Second and later convictions carry half again the rolled sentence. */
 const REPEAT_OFFENDER_MULT = 1.5;
 
 /** Mood cost of being convicted, on top of the sentence itself. */
 const CONVICTION_HAPPINESS = 10;
 
-const DEFAULT_DEATH_CAUSE = 'natural causes';
-
-/* Registry maps are typed as total records, so widen before lookup: a hand-built
-   or partially loaded registry can still miss the key we ask for. */
 function findInteraction(reg: ContentRegistry, id: string): InteractionDef | undefined {
-  const byId: Record<string, InteractionDef | undefined> = reg.interactionsById;
-  return byId[id];
+  return findById(reg.interactionsById, reg.interactions, id);
 }
 
 function findCrime(reg: ContentRegistry, id: string): CrimeDef | undefined {
-  const byId: Record<string, CrimeDef | undefined> = reg.crimesById;
-  return byId[id];
+  return findById(reg.crimesById, reg.crimes, id);
 }
 
 /**
@@ -64,13 +57,6 @@ function findCrime(reg: ContentRegistry, id: string): CrimeDef | undefined {
 function costOf(ctx: Ctx, def: InteractionDef): number {
   const raw = typeof def.cost === 'function' ? def.cost(ctx) : def.cost ?? 0;
   return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : Number.POSITIVE_INFINITY;
-}
-
-/** Death protocol: effects only mark a death, the obituary is settled here. */
-function settleDeath(state: GameState, reg: ContentRegistry): void {
-  if (state.phase !== 'dead' || state.death) return;
-  const cause = String(state.character.flags.pendingDeathCause ?? DEFAULT_DEATH_CAUSE);
-  killCharacter(state, reg, cause);
 }
 
 /**
@@ -124,8 +110,8 @@ export function canUse(
     return cost === undefined ? { ok: false, reason } : { ok: false, reason, cost };
   };
 
-  // A finished life is read-only: no action may touch it or its epitaph stats.
-  if (ctx.state.phase === 'dead') return refuse(LIFE_OVER);
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(ctx.state)) return refuse(LIFE_OVER);
 
   if (age < (def.minAge ?? 0)) return refuse("You're too young.");
   if (age > (def.maxAge ?? DEFAULT_MAX_AGE)) return refuse("You're too old.");
@@ -257,7 +243,8 @@ export function commitCrime(
   const c = state.character;
   const def = findCrime(reg, crimeId);
   if (!def) return { text: 'You thought better of it.', icon: BLOCKED_ICON, entries: [] };
-  if (state.phase === 'dead') return { text: LIFE_OVER, icon: BLOCKED_ICON, entries: [] };
+  // A finished life is read-only; see `lifeIsOver`.
+  if (lifeIsOver(state)) return { text: LIFE_OVER, icon: BLOCKED_ICON, entries: [] };
   if (c.prison) return { text: "You're already in prison.", icon: BLOCKED_ICON, entries: [] };
   // Guard before the roll, like `canUse`: a refused crime must not spend a draw.
   if (c.age < def.minAge) {

@@ -5,6 +5,7 @@
  * the engine and UI read from.
  */
 
+import { isDrawableWeight } from '@/engine/rng';
 import type {
   ContentPack,
   ContentRegistry,
@@ -31,17 +32,14 @@ function owns(record: Record<string, unknown>, key: string): boolean {
 /**
  * An id map that inherits nothing.
  *
- * Every index the registry hands out is read through a widened lookup —
- * `findJob`, `findSchool`, `findIllness`, `findCountry`, `findAsset`,
- * `findEvent`, `findInteraction`, `findCrime` all do `byId[id]` against a
- * `Record<string, T | undefined>` — and a plain object literal answers
- * `toString`, `constructor`, `valueOf`, `hasOwnProperty` and `__proto__` with an
- * inherited member instead of `undefined`. That truthy answer defeats every
- * missing-def guard downstream: a `jobId` of `toString` reaches
- * `job.salary * (1 + def.raisePct)` and turns the whole balance sheet into NaN,
- * an `enrolledIn` of `valueOf` never trips the education self-heal, and a
- * `countryId` of `constructor` builds a character with no country at all. A
- * content id is data, so the table it is looked up in must hold data only.
+ * Every index the registry hands out is read through `findById`, and a plain
+ * object literal answers `toString`, `constructor`, `valueOf`, `hasOwnProperty`
+ * and `__proto__` with an inherited member instead of `undefined`. That truthy
+ * answer defeats every missing-def guard downstream: a `jobId` of `toString`
+ * reaches `job.salary * (1 + def.raisePct)` and turns the whole balance sheet
+ * into NaN, an `enrolledIn` of `valueOf` never trips the education self-heal,
+ * and a `countryId` of `constructor` builds a character with no country at all.
+ * A content id is data, so the table it is looked up in must hold data only.
  * `fillTemplate` is hardened the same way for the same reason.
  */
 function idMap<T>(): Record<string, T> {
@@ -148,6 +146,35 @@ export function buildRegistry(packs: ContentPack[]): ContentRegistry {
   };
   authoredNamePools.set(registry, namePools.list);
   return registry;
+}
+
+/**
+ * Own-property read of a registry index.
+ *
+ * `idMap` inherits nothing, but only a registry `buildRegistry` assembled is
+ * built from one: a hand-built, partially loaded or externally supplied
+ * registry indexes with a plain object literal, and that answers `toString` and
+ * friends with an inherited member — see `idMap` for what a truthy answer costs
+ * downstream. A content id is data, so only data the table actually holds may
+ * come back.
+ */
+export function findByKey<T>(index: Record<string, T>, key: string): T | undefined {
+  return owns(index, key) ? index[key] : undefined;
+}
+
+/**
+ * The one supported way to read a registry index by an id a caller supplied.
+ *
+ * The index first, own-property only; then the flat list, for a registry whose
+ * two halves disagree. `collect` indexes every id it lists, so for anything
+ * `buildRegistry` produced the fallback can only ever repeat the index's answer.
+ */
+export function findById<T extends { id: string }>(
+  index: Record<string, T>,
+  list: readonly T[],
+  id: string
+): T | undefined {
+  return findByKey(index, id) ?? list.find((item) => item.id === id);
 }
 
 /** Reports every id that appears more than once in one collection. */
@@ -305,11 +332,10 @@ function checkEvents(reg: ContentRegistry, problems: string[]): void {
     if (event.minAge > event.maxAge) {
       problems.push(`event "${event.id}" has minAge ${event.minAge} above maxAge ${event.maxAge}`);
     }
-    /* Finite AND strictly positive, the same predicate `rng.weighted` applies
-       and `eventsPhase.isEligible` mirrors. `Infinity > 0` is true, so a looser
-       test lets an infinite weight validate clean and then throw at draw time —
-       precisely the class of bug this lint exists to name before it ships. */
-    if (!(Number.isFinite(event.weight) && event.weight > 0)) {
+    /* An event `rng.weighted` cannot land on never fires: `eventsPhase` gates
+       the pool on the same predicate, so the def ships as permanently dead
+       content — precisely the class of bug this lint exists to name. */
+    if (!isDrawableWeight(event.weight)) {
       problems.push(`event "${event.id}" has weight ${event.weight}`);
     }
     checkIllnessRefs(reg, event, event.effects, reportedIllnesses, problems);
@@ -330,11 +356,11 @@ function checkEvents(reg: ContentRegistry, problems: string[]): void {
         continue;
       }
       outcomes.forEach((outcome, index) => {
-        /* Same predicate as the event weight above, for the same reason: an
-           infinite outcome weight is what `canRollOutcome` rejects, so the card
-           is dealt and then discarded with 'The moment passed...' every single
-           time — a permanently dead branch this lint has to name. */
-        if (!(Number.isFinite(outcome.weight) && outcome.weight > 0)) {
+        /* Same predicate as the event weight above, for the same reason: a
+           weight `canRollOutcome` rejects gets the card dealt and then discarded
+           with 'The moment passed...' every single time — a permanently dead
+           branch this lint has to name. */
+        if (!isDrawableWeight(outcome.weight)) {
           problems.push(
             `event "${event.id}" choice "${choice.label}" outcome ${index} has weight ${outcome.weight}`
           );

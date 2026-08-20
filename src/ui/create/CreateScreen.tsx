@@ -76,7 +76,9 @@ export function CreateScreen(): ReactElement {
        untouched field. */
     const trimmedFirst = first.trim();
     const trimmedLast = last.trim();
-    // newLife itself switches to the life screen.
+    /* The slot the load menu armed with `beginNewLife`, falling back to the
+       first one for a create screen reached without one. `newLife` itself
+       switches to the life screen. */
     useGameStore.getState().newLife({
       slot: useGameStore.getState().slot ?? 1,
       seed,

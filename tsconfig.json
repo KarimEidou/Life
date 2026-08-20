@@ -22,6 +22,9 @@
     "paths": {
       "@/*": ["src/*"]
     },
+    // Browser-only, deliberately: keep `node` out of this list or `src/` could
+    // reach for `process`/`Buffer` and typecheck while failing in the browser.
+    // The Node-flavoured tooling has its own program, `tsconfig.tools.json`.
     "types": ["vite/client"]
   },
   "include": ["src"]

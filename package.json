@@ -3,6 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build",
@@ -10,6 +13,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:dom": "vitest run --project dom",
+    "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json",
     "e2e": "playwright test",
     "screenshots": "playwright test e2e/screenshots.spec.ts",
@@ -23,9 +28,15 @@
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@vitejs/plugin-react": "4.3.4",
+    "@vitest/coverage-v8": "2.1.9",
+    "jsdom": "25.0.1",
     "typescript": "5.6.3",
     "vite": "5.4.21",
     "vite-plugin-singlefile": "2.3.3",

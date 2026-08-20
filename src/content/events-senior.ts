@@ -1,4 +1,12 @@
-import { sellAsset } from '@/engine/phases/finance';
+import {
+  alivePeople,
+  firstNameOf,
+  free,
+  holds,
+  relWith,
+  sellAsset,
+  spouseOf,
+} from '@/content/lib';
 import type {
   AssetDef,
   ContentPack,
@@ -34,35 +42,9 @@ import type {
 /* Lookups                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Everyone still alive. Widened first: a loaded save can hold a hole. */
-function alivePeople(state: GameState): Person[] {
-  const list: (Person | undefined)[] = Object.values(state.people);
-  return list.filter((p): p is Person => p !== undefined && p.alive === true);
-}
-
-function spouseOf(state: GameState): Person | undefined {
-  return alivePeople(state).find((p) => p.kind === 'spouse');
-}
-
 /** A living child old enough to plausibly have children of their own. */
 function grownChild(state: GameState): Person | undefined {
   return alivePeople(state).find((p) => p.kind === 'child' && p.age >= 25);
-}
-
-/** The name a sentence should call somebody, never an empty string. */
-function firstNameOf(person: Person, fallback: string): string {
-  const parts = person.name.trim().split(/\s+/);
-  return parts[0] || fallback;
-}
-
-/** Not behind bars. Asked by nearly everything: the prison pack owns those years. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
-
-/** True while the character is already carrying this condition, treated or not. */
-function holds(ctx: Ctx, defId: string): boolean {
-  return ctx.c.illnesses.some((illness) => illness.defId === defId);
 }
 
 /** Flags are free-form JSON; only a genuine finite number counts as a pension. */
@@ -116,29 +98,6 @@ function priciestProperty(world: World): OwnedAsset | undefined {
 /* ------------------------------------------------------------------ */
 /* Effect helpers                                                      */
 /* ------------------------------------------------------------------ */
-
-/** Same 0..100 rounding the engine applies to stats, for the fields it does not own. */
-function clamped(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
-  return Math.round(bounded * 10) / 10;
-}
-
-/**
- * Moves affinity with one person picked out of the table.
- * `{kind:'rel'}` addresses people by sentinel or explicit id, and neither names
- * "the child who drove over on Sunday", so those land here instead.
- */
-function relWith(pick: (state: GameState) => Person | undefined, delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      const person = pick(ctx.state);
-      if (!person) return;
-      person.rel = clamped(person.rel + delta);
-    },
-  };
-}
 
 /**
  * Sells the big house.
@@ -394,7 +353,7 @@ const events: EventDef[] = [
     /* Once per bad back, not once a year: the illness effect is idempotent but
        the health and mood it costs are not, so a second telling would charge for
        a diagnosis the character already has. */
-    condition: (ctx: Ctx) => free(ctx) && !holds(ctx, 'ill-back-pain'),
+    condition: (ctx: Ctx) => free(ctx) && !holds(ctx.c, 'ill-back-pain'),
     text: 'Your hip started announcing the weather a day in advance.',
     effects: [
       { kind: 'illness', add: 'ill-back-pain' },

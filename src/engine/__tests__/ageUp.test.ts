@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ageUp, currentYearLog, resolveChoice } from '@/engine/ageUp';
+import { PHASES, ageUp, currentYearLog, resolveChoice } from '@/engine/ageUp';
 import { agingPhase } from '@/engine/phases/aging';
+import { careerPhase } from '@/engine/phases/career';
 import { deathCheckPhase } from '@/engine/phases/deathCheck';
+import { educationPhase } from '@/engine/phases/education';
+import { eventsPhase } from '@/engine/phases/events';
+import { financePhase } from '@/engine/phases/finance';
+import { healthPhase } from '@/engine/phases/health';
+import { relationshipsPhase } from '@/engine/phases/relationships';
 import { killCharacter, startLegacy } from '@/engine/death';
 import { createRng } from '@/engine/rng';
 import { addPerson, createLife } from '@/engine/state';
@@ -168,6 +174,28 @@ describe('currentYearLog', () => {
     const state = newLife(4);
     state.log.push({ age: 1, year: 2001, entries: [] });
     expect(currentYearLog(state).age).toBe(1);
+  });
+});
+
+/* Asserted against the real phase modules rather than the stand-in chain the
+   orchestration tests swap in: this is the shipped pipeline, in the order
+   `PHASE_ORDER` names. */
+describe('PHASES', () => {
+  it('is the eight real phases, in the documented order', () => {
+    const expected: PhaseFn[] = [
+      agingPhase,
+      healthPhase,
+      educationPhase,
+      relationshipsPhase,
+      careerPhase,
+      financePhase,
+      eventsPhase,
+      deathCheckPhase,
+    ];
+    expect(PHASES).toHaveLength(PHASE_ORDER.length);
+    expected.forEach((phase, i) => {
+      expect(PHASES[i]).toBe(phase);
+    });
   });
 });
 

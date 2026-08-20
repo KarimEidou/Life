@@ -1,4 +1,20 @@
-import { addPerson } from '@/engine/state';
+import {
+  ROLLED_GENDERS,
+  addPerson,
+  alivePeople,
+  childAged,
+  clampStat,
+  employed,
+  firstNameOf,
+  free,
+  holds,
+  relWith,
+  rollFirstName,
+  rollLastName,
+  romanceOf,
+  siblingOf,
+  spouseOf,
+} from '@/content/lib';
 import type {
   AssetDef,
   ContentPack,
@@ -7,8 +23,6 @@ import type {
   EffectCtx,
   EventDef,
   GameState,
-  Gender,
-  NamePool,
   OwnedAsset,
   Person,
 } from '@/types';
@@ -32,32 +46,6 @@ import type {
 /* Lookups                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Everyone still alive. Widened first: a loaded save can hold a hole. */
-function alivePeople(state: GameState): Person[] {
-  const list: (Person | undefined)[] = Object.values(state.people);
-  return list.filter((p): p is Person => p !== undefined && p.alive === true);
-}
-
-/** The current spouse, else the current partner, else nobody. */
-function romance(state: GameState): Person | undefined {
-  const alive = alivePeople(state);
-  return alive.find((p) => p.kind === 'spouse') ?? alive.find((p) => p.kind === 'partner');
-}
-
-function spouseOf(state: GameState): Person | undefined {
-  return alivePeople(state).find((p) => p.kind === 'spouse');
-}
-
-function siblingOf(state: GameState): Person | undefined {
-  return alivePeople(state).find((p) => p.kind === 'sibling');
-}
-
-function childAged(state: GameState, minAge: number, maxAge: number): Person | undefined {
-  return alivePeople(state).find(
-    (p) => p.kind === 'child' && p.age >= minAge && p.age <= maxAge
-  );
-}
-
 function childCount(state: GameState): number {
   return alivePeople(state).filter((p) => p.kind === 'child').length;
 }
@@ -73,36 +61,6 @@ function hasBloodFamily(state: GameState): boolean {
   return alivePeople(state).some(
     (p) => p.kind === 'mother' || p.kind === 'father' || p.kind === 'sibling'
   );
-}
-
-/**
- * The name a sentence should call somebody, never an empty string.
- *
- * `name` is typed `string`, but it comes out of `state.people`, which the save
- * gate only proves is an object — a drifted row can carry no name at all. This
- * runs inside `resolveText`, so a throw here unwinds out of `eventsPhase` with
- * the year already half applied.
- */
-function firstNameOf(person: Person, fallback: string): string {
-  const raw: unknown = person.name;
-  if (typeof raw !== 'string') return fallback;
-  const parts = raw.trim().split(/\s+/);
-  return parts[0] || fallback;
-}
-
-/** Not behind bars. Asked by nearly everything: the prison pack owns those years. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
-
-/** True while the character is already carrying this condition, treated or not. */
-function holds(ctx: Ctx, defId: string): boolean {
-  return ctx.c.illnesses.some((illness) => illness.defId === defId);
-}
-
-/** Holding a job and out in the world to do it. */
-function employed(ctx: Ctx): boolean {
-  return ctx.c.job !== null && ctx.c.prison === null;
 }
 
 /**
@@ -141,13 +99,6 @@ function renting(ctx: Ctx): boolean {
 /* Effect helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-/** Same 0..100 rounding the engine applies to stats, for the fields it does not own. */
-function clamped(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
-  return Math.round(bounded * 10) / 10;
-}
-
 /**
  * Moves standing with the employer.
  * `JobState.performance` has no declarative effect, and the job can be gone by
@@ -159,23 +110,7 @@ function performance(delta: number): Effect {
     run: (ctx: EffectCtx) => {
       const job = ctx.state.character.job;
       if (!job) return;
-      job.performance = clamped(job.performance + delta);
-    },
-  };
-}
-
-/**
- * Moves affinity with one person picked out of the table.
- * `{kind:'rel'}` addresses people by sentinel or explicit id, and neither names
- * "the sibling who asked for money", so those land here instead.
- */
-function relWith(pick: (state: GameState) => Person | undefined, delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      const person = pick(ctx.state);
-      if (!person) return;
-      person.rel = clamped(person.rel + delta);
+      job.performance = clampStat(job.performance + delta);
     },
   };
 }
@@ -195,8 +130,6 @@ const convicted: Effect = {
 /* Minting people                                                      */
 /* ------------------------------------------------------------------ */
 
-const ROLLED_GENDERS: readonly Gender[] = ['male', 'female'];
-
 const PET_NAMES: readonly string[] = [
   'Biscuit',
   'Noodle',
@@ -210,25 +143,6 @@ const PET_NAMES: readonly string[] = [
   'Olive',
 ];
 
-function poolFor(ctx: EffectCtx): NamePool | undefined {
-  const pools: Record<string, NamePool | undefined> = ctx.reg.namePools;
-  return pools[ctx.state.character.countryId];
-}
-
-/** A plausible local given name, or a neutral stand-in when no pool is loaded. */
-function rollFirstName(ctx: EffectCtx, gender: Gender): string {
-  const pool = poolFor(ctx);
-  const given = gender === 'female' ? pool?.female : pool?.male;
-  if (given && given.length > 0) return ctx.rng.pick(given);
-  return gender === 'female' ? 'Riley' : 'Alex';
-}
-
-function rollLastName(ctx: EffectCtx): string {
-  const pool = poolFor(ctx);
-  if (pool && pool.last.length > 0) return ctx.rng.pick(pool.last);
-  return ctx.state.character.lastName || 'Doe';
-}
-
 /**
  * Starts a romance with somebody new.
  * Guarded against a second partner: the card is answered a moment after it is
@@ -237,7 +151,7 @@ function rollLastName(ctx: EffectCtx): string {
 const startRomance: Effect = {
   kind: 'fn',
   run: (ctx: EffectCtx) => {
-    if (romance(ctx.state)) return;
+    if (romanceOf(ctx.state)) return;
     const gender = ctx.rng.pick(ROLLED_GENDERS);
     const age = Math.max(18, ctx.state.character.age + ctx.rng.int(-6, 6));
     addPerson(ctx.state, {
@@ -385,20 +299,6 @@ const events: EventDef[] = [
     ],
   },
   {
-    id: 'ev-adult-layoff-rumor',
-    area: 'work',
-    icon: '📉',
-    minAge: 20,
-    maxAge: 64,
-    weight: 5,
-    condition: employed,
-    text: 'Layoff rumors went around the office. Nobody would say who.',
-    effects: [
-      { kind: 'stat', stat: 'happiness', delta: -5 },
-      { kind: 'stat', stat: 'health', delta: -1 },
-    ],
-  },
-  {
     id: 'ev-adult-office-party',
     area: 'work',
     icon: '🎉',
@@ -463,7 +363,15 @@ const events: EventDef[] = [
     maxAge: 64,
     weight: 5,
     condition: employed,
-    text: 'Your boss called a 7am meeting to explain that email is faster than meetings.',
+    /* A bad year at work, told two ways. `ev-adult-layoff-rumor` shipped beside
+       this card with the same area, the same gate and the same two stat rows, so
+       the pack was charging ten weight for one beat; the rumour is a second
+       telling of it rather than a second card. */
+    text: (ctx) =>
+      ctx.rng.pick([
+        'Your boss called a 7am meeting to explain that email is faster than meetings.',
+        'Layoff rumors went around the office. Nobody would say who.',
+      ]),
     effects: [
       { kind: 'stat', stat: 'happiness', delta: -5 },
       { kind: 'stat', stat: 'health', delta: -1 },
@@ -491,7 +399,7 @@ const events: EventDef[] = [
       },
       {
         label: 'Flirt back',
-        condition: (ctx) => romance(ctx.state) === undefined,
+        condition: (ctx) => romanceOf(ctx.state) === undefined,
         outcomes: [
           {
             weight: 4,
@@ -507,7 +415,7 @@ const events: EventDef[] = [
       },
       {
         label: 'Flirt back anyway',
-        condition: (ctx) => romance(ctx.state) !== undefined,
+        condition: (ctx) => romanceOf(ctx.state) !== undefined,
         outcomes: [
           {
             weight: 4,
@@ -846,7 +754,7 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 64,
     weight: 5,
-    condition: (ctx) => free(ctx) && romance(ctx.state) === undefined,
+    condition: (ctx) => free(ctx) && romanceOf(ctx.state) === undefined,
     text: 'You and a stranger reached for the same thing at the same time. They laughed first.',
     choices: [
       {
@@ -876,67 +784,12 @@ const events: EventDef[] = [
       },
     ],
   },
-  {
-    id: 'ev-adult-anniversary',
-    area: 'love',
-    icon: '🥂',
-    minAge: 18,
-    maxAge: 64,
-    weight: 4,
-    condition: (ctx) => free(ctx) && romance(ctx.state) !== undefined,
-    text: 'You and {partner} hit another year together.',
-    effects: [
-      { kind: 'rel', who: 'partner', delta: 6 },
-      { kind: 'stat', stat: 'happiness', delta: 6 },
-      { kind: 'money', delta: -200 },
-    ],
-  },
-  {
-    id: 'ev-adult-in-law-drama',
-    area: 'love',
-    icon: '🍽️',
-    minAge: 20,
-    maxAge: 64,
-    weight: 3,
-    condition: (ctx) => free(ctx) && spouseOf(ctx.state) !== undefined,
-    text: 'Your mother-in-law has opinions about your home, your job and your cooking.',
-    choices: [
-      {
-        label: 'Push back',
-        outcomes: [
-          {
-            weight: 4,
-            text: 'You said your piece at dinner. {partner} did not back you up.',
-            effects: [
-              { kind: 'rel', who: 'partner', delta: -8 },
-              { kind: 'stat', stat: 'happiness', delta: -5 },
-            ],
-          },
-          {
-            weight: 3,
-            text: 'You said your piece and {partner} said the rest. She went quiet.',
-            effects: [
-              { kind: 'rel', who: 'partner', delta: 7 },
-              { kind: 'stat', stat: 'happiness', delta: 5 },
-            ],
-          },
-        ],
-      },
-      {
-        label: 'Smile and refill the wine',
-        outcomes: [
-          {
-            weight: 1,
-            text: 'You nodded through dessert. {partner} owes you one.',
-            effects: [
-              { kind: 'rel', who: 'partner', delta: 4 },
-              { kind: 'stat', stat: 'happiness', delta: -3 },
-            ],
-          },
-        ],
-      },
-    ],
-  },
+  /* The anniversary and the in-laws used to live here too, at ages 18-64, and
+     the relationships pack ships both for the whole life. A married character
+     therefore carried eight weight of "another year together" and six of "your
+     in-laws have opinions" instead of the four and three either author wrote,
+     so this pack dropped its copies: `ev-rel-anniversary` and `ev-rel-in-laws`
+     are the single home for both beats, and they took the flavour with them. */
   {
     id: 'ev-adult-partner-wants-pet',
     area: 'love',
@@ -944,7 +797,7 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 64,
     weight: 3,
-    condition: (ctx) => free(ctx) && romance(ctx.state) !== undefined,
+    condition: (ctx) => free(ctx) && romanceOf(ctx.state) !== undefined,
     text: '{partner} has sent you seventeen photos of the same shelter dog.',
     choices: [
       {
@@ -1291,7 +1144,7 @@ const events: EventDef[] = [
     /* The illness effect is idempotent but the health and mood it costs are not,
        so a second telling while the first bout is still running would charge for
        a diagnosis the character already has. */
-    condition: (ctx) => free(ctx) && !holds(ctx, 'ill-food-poisoning'),
+    condition: (ctx) => free(ctx) && !holds(ctx.c, 'ill-food-poisoning'),
     text: 'The gas station sushi seemed fine at the time.',
     effects: [
       { kind: 'illness', add: 'ill-food-poisoning' },
@@ -1299,21 +1152,10 @@ const events: EventDef[] = [
       { kind: 'stat', stat: 'happiness', delta: -5 },
     ],
   },
-  {
-    id: 'ev-adult-sleepless-week',
-    area: 'health',
-    icon: '🥱',
-    minAge: 18,
-    maxAge: 64,
-    weight: 4,
-    condition: free,
-    text: 'You did not sleep properly for a week. Everything got harder.',
-    effects: [
-      { kind: 'stat', stat: 'health', delta: -2 },
-      { kind: 'stat', stat: 'happiness', delta: -5 },
-      { kind: 'stat', stat: 'smarts', delta: -2 },
-    ],
-  },
+  /* A sleepless week used to sit here as well, at slightly harsher numbers than
+     the health pack's `ev-health-insomnia` — the same bad-sleep card, drawn
+     twice, and a bout the body has wherever it is kept. The health pack keeps
+     it, for every age rather than only 18-64, and took the second telling. */
   {
     id: 'ev-adult-desk-back-pain',
     area: 'health',
@@ -1326,7 +1168,7 @@ const events: EventDef[] = [
     /* And not developed at all once `healthPhase` has already handed it over:
        the illness effect would add nothing, but the health and mood it costs
        would still land and the once-per-life slot would be spent on a no-op. */
-    condition: (ctx) => employed(ctx) && !holds(ctx, 'ill-back-pain'),
+    condition: (ctx) => employed(ctx) && !holds(ctx.c, 'ill-back-pain'),
     text: 'Your chair, your posture and your job have been arguing about your spine.',
     effects: [
       { kind: 'illness', add: 'ill-back-pain' },

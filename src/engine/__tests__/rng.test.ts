@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Rng } from '@/types';
-import { createRng, initialRngState } from '@/engine/rng';
+import { createRng, initialRngState, isDrawableWeight } from '@/engine/rng';
 
 /** Fresh cursor + generator for a seed. */
 function make(seed: number): { container: { rngState: number }; rng: Rng } {
@@ -214,6 +214,46 @@ describe('weighted', () => {
     expect(() => rng.weighted([1, 2, 3], () => 0)).toThrow(/positive weight/);
     expect(() => rng.weighted([], () => 1)).toThrow(/positive weight/);
     expect(container.rngState).toBe(before);
+  });
+});
+
+/* The predicate every pool builder gates on before it draws: `eventsPhase`,
+   `ageUp.canRollOutcome` and the two `validateRegistry` weight lints all call
+   it, so these cases are the shared oracle for all four. */
+describe('isDrawableWeight', () => {
+  it('accepts exactly the finite, strictly positive weights', () => {
+    for (const w of [1, 5, 0.001, 1e-9, 1000, Number.MAX_VALUE]) {
+      expect(isDrawableWeight(w), `weight ${w}`).toBe(true);
+    }
+    // `Infinity > 0` is true, which is the whole reason the finite test is there.
+    const refused = [0, -1, -1e-9, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    for (const w of refused) {
+      expect(isDrawableWeight(w), `weight ${w}`).toBe(false);
+    }
+  });
+
+  it('names exactly the items `weighted` can return', () => {
+    const junk = [0, -3, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    const weights = [...junk, 2, 0.5];
+    const { rng } = make(58);
+    const seen = new Set<number>();
+    for (let i = 0; i < 2000; i++) seen.add(rng.weighted(weights, (w) => w));
+
+    const ascending = (a: number, b: number): number => a - b;
+    expect([...seen].sort(ascending)).toEqual(weights.filter(isDrawableWeight).sort(ascending));
+  });
+
+  it('names exactly the pools `weighted` refuses to draw from', () => {
+    const junk = [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    expect(junk.some(isDrawableWeight)).toBe(false);
+
+    const { container, rng } = make(59);
+    const before = container.rngState;
+    expect(() => rng.weighted(junk, (w) => w)).toThrow(/positive weight/);
+    expect(container.rngState).toBe(before);
+
+    // One drawable weight among the junk and the same pool draws cleanly.
+    expect(rng.weighted([...junk, 4], (w) => w)).toBe(4);
   });
 });
 

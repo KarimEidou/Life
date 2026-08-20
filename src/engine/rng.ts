@@ -20,6 +20,18 @@ const MULBERRY_INCREMENT = 0x6d2b79f5;
 /** 2^32 — divisor that maps the 32-bit output into [0, 1). */
 const UINT32_SPAN = 4294967296;
 
+/**
+ * The only weights `weighted` can land on: finite and strictly positive.
+ *
+ * Exported because every caller that builds a pool has to gate on the same
+ * answer *before* it draws — `weighted` throws when nothing qualifies, and
+ * `Infinity > 0` is true, so a looser gate lets a weight through that the draw
+ * then refuses. Sharing this function is what keeps those gates from drifting.
+ */
+export function isDrawableWeight(weight: number): boolean {
+  return Number.isFinite(weight) && weight > 0;
+}
+
 /** Normalises an arbitrary seed into the 32-bit unsigned cursor mulberry32 expects. */
 export function initialRngState(seed: number): number {
   const whole = Number.isFinite(seed) ? Math.trunc(seed) : 0;
@@ -83,11 +95,11 @@ export function createRng(container: { rngState: number }): Rng {
     weighted<T>(items: readonly T[], weight: (t: T) => number): T {
       let total = 0;
       let lastPositive = -1;
-      // Zero/negative weights repeat the running total, so no roll can land on them.
+      // An undrawable weight repeats the running total, so no roll can land on it.
       const cumulative: number[] = [];
       for (let i = 0; i < items.length; i++) {
         const w = weight(items[i] as T);
-        if (Number.isFinite(w) && w > 0) {
+        if (isDrawableWeight(w)) {
           total += w;
           lastPositive = i;
         }

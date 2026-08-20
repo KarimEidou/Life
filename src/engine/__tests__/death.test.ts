@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { killCharacter, startLegacy } from '@/engine/death';
+import { DEFAULT_DEATH_CAUSE, killCharacter, settleDeath, startLegacy } from '@/engine/death';
 import { deathCheckPhase, deathProbability } from '@/engine/phases/deathCheck';
 import { createRng } from '@/engine/rng';
 import { addPerson, createLife } from '@/engine/state';
@@ -259,6 +259,93 @@ describe('killCharacter', () => {
     const never = life(emptyRegistry(), 30, 2030);
     killCharacter(never, emptyRegistry(), 'a sudden illness');
     expect(never.death?.epitaphStats.jobsHeld).toBe(0);
+  });
+});
+
+/* --------------------------------------------------------------------------
+   settleDeath
+-------------------------------------------------------------------------- */
+
+describe('settleDeath', () => {
+  const CARD = {
+    eventId: 'fork',
+    text: 'A fork in the road.',
+    icon: '🍴',
+    choices: [{ label: 'Right' }],
+  };
+
+  /** A life a phase, an effect or a player action has marked dead. */
+  function marked(cause?: string): GameState {
+    const state = life(emptyRegistry(), 62, 2062);
+    state.phase = 'dead';
+    if (cause !== undefined) state.character.flags.pendingDeathCause = cause;
+    state.pending = [{ ...CARD }];
+    return state;
+  }
+
+  it('leaves a life that is still running alone', () => {
+    const state = life(emptyRegistry(), 30, 2030);
+    state.pending = [{ ...CARD }];
+
+    expect(settleDeath(state, emptyRegistry())).toBe(false);
+    expect(state.death).toBeUndefined();
+    expect(state.phase).toBe('alive');
+    expect(state.pending).toHaveLength(1);
+  });
+
+  it('writes the obituary from the marked cause and drops the queue', () => {
+    const state = marked('a shark attack');
+
+    expect(settleDeath(state, emptyRegistry())).toBe(true);
+    expect(state.death?.cause).toBe('a shark attack');
+    expect(state.death?.obituary).toContain('Died of a shark attack at 62.');
+    expect(state.pending).toEqual([]);
+  });
+
+  it('falls back to the default cause when nothing named one', () => {
+    const state = marked();
+
+    expect(settleDeath(state, emptyRegistry())).toBe(true);
+    expect(DEFAULT_DEATH_CAUSE).toBe('natural causes');
+    expect(state.death?.cause).toBe(DEFAULT_DEATH_CAUSE);
+    expect(state.death?.obituary).toContain(`Died of ${DEFAULT_DEATH_CAUSE} at 62.`);
+  });
+
+  /* A save can hold anything under the flag; it is a cause to read out, not a
+     number to do arithmetic on, so it is quoted rather than refused. */
+  it('reads a cause a save damaged as text', () => {
+    const state = marked();
+    state.character.flags.pendingDeathCause = 7;
+
+    expect(settleDeath(state, emptyRegistry())).toBe(true);
+    expect(state.death?.cause).toBe('7');
+  });
+
+  it('leaves an obituary that is already written alone, and still drops the queue', () => {
+    const state = marked('a shark attack');
+    state.death = {
+      cause: 'stage fright',
+      age: 61,
+      obituary: 'Written elsewhere.',
+      epitaphStats: { netWorth: 0, jobsHeld: 0, kids: 0 },
+    };
+    const before = state.log[state.log.length - 1].entries.length;
+
+    expect(settleDeath(state, emptyRegistry())).toBe(true);
+    expect(state.death?.obituary).toBe('Written elsewhere.');
+    expect(state.death?.cause).toBe('stage fright');
+    // `killCharacter` never ran, so there is no second death line.
+    expect(state.log[state.log.length - 1].entries).toHaveLength(before);
+    expect(state.pending).toEqual([]);
+  });
+
+  it('settles without spending a draw', () => {
+    const state = marked('a shark attack');
+    const cursor = state.rngState;
+
+    settleDeath(state, emptyRegistry());
+
+    expect(state.rngState).toBe(cursor);
   });
 });
 

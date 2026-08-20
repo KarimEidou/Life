@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { ageUp } from '@/engine/ageUp';
+import { buildRegistry } from '@/engine/registry';
+import { initialRngState } from '@/engine/rng';
 import {
   SLOT_COUNT,
   browserStorage,
@@ -8,10 +11,13 @@ import {
   loadSettings,
   loadUnlockedAchievements,
   memoryStorage,
+  migrate,
   migrations,
   saveGame,
   saveSettings,
   saveUnlockedAchievements,
+  slotKey,
+  tableKey,
 } from '@/engine/save';
 import type { StorageAdapter } from '@/engine/save';
 import { SAVE_VERSION } from '@/types';
@@ -111,6 +117,30 @@ function loadedState(storage: StorageAdapter, slot: number): GameState {
   return res.state;
 }
 
+/** The fixture as it comes back out of storage: plain JSON, free to damage. */
+function drifted(): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(fixture('Ada'))) as Record<string, unknown>;
+}
+
+/** Stores `state` in slot 1 under an envelope this build accepts. */
+function write(storage: StorageAdapter, state: unknown): void {
+  const envelope = { version: SAVE_VERSION, savedAt: 1, slot: 1, state };
+  storage.setItem('ol.save.1', JSON.stringify(envelope));
+}
+
+/** Resolves a dotted path to the record holding its last segment. */
+function at(
+  host: Record<string, unknown>,
+  path: string
+): { parent: Record<string, unknown>; key: string } {
+  const parts = path.split('.');
+  let parent = host;
+  for (const part of parts.slice(0, -1)) {
+    parent = parent[part] as Record<string, unknown>;
+  }
+  return { parent, key: parts[parts.length - 1] };
+}
+
 describe('saveGame / loadGame', () => {
   it('round-trips a state unchanged', () => {
     const storage = memoryStorage();
@@ -207,59 +237,204 @@ describe('saveGame / loadGame', () => {
     expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'corrupt' });
   });
 
-  it('rejects a save missing any one container the app dereferences unguarded', () => {
+  it('refuses a payload that is not a character at all', () => {
+    /* The reject set is deliberately tiny: a name, an age, and the records the
+       repair pass fills in key by key. Everything on it is a field where
+       inventing a value would hand the player a character they never played,
+       and a refusal costs them the whole life — the load menu answers `corrupt`
+       with a Delete button. */
     const storage = memoryStorage();
-    const write = (state: unknown): void => {
-      storage.setItem(
-        'ol.save.1',
-        JSON.stringify({ version: SAVE_VERSION, savedAt: 1, slot: 1, state })
-      );
-    };
-    const drifted = (): Record<string, unknown> =>
-      JSON.parse(JSON.stringify(fixture('Ada'))) as Record<string, unknown>;
 
     // The intact fixture has to pass, or every case below succeeds vacuously.
-    write(drifted());
+    write(storage, drifted());
     expect(loadGame(storage, 1).ok).toBe(true);
 
-    for (const key of [
-      'character',
-      'people',
-      'log',
-      'pending',
-      'firedEvents',
-      'interactionUse',
-      'ancestors',
-      'phase',
-    ]) {
-      const state = drifted();
-      delete state[key];
-      write(state);
-      expect(loadGame(storage, 1), `state.${key}`).toEqual({ ok: false, reason: 'corrupt' });
-    }
+    const state = drifted();
+    delete state.character;
+    write(storage, state);
+    expect(loadGame(storage, 1), 'state.character').toEqual({ ok: false, reason: 'corrupt' });
 
-    for (const key of [
-      'stats',
-      'education',
-      'pronouns',
-      'flags',
-      'investments',
-      'addictions',
-      'assets',
-      'loans',
-      'illnesses',
-      'job',
-      'prison',
-    ]) {
-      const state = drifted();
-      delete (state.character as Record<string, unknown>)[key];
-      write(state);
+    for (const key of ['stats', 'education', 'investments', 'flags', 'pronouns']) {
+      const damaged = drifted();
+      delete (damaged.character as Record<string, unknown>)[key];
+      write(storage, damaged);
       expect(loadGame(storage, 1), `character.${key}`).toEqual({ ok: false, reason: 'corrupt' });
     }
 
-    // `job` and `prison` are legitimately null; absent is what breaks the header.
-    write(fixture('Ada', { character: { ...fixture('Ada').character, job: null } }));
-    expect(loadGame(storage, 1).ok).toBe(true);
+    for (const [key, value] of [
+      ['firstName', 7],
+      ['lastName', null],
+      ['age', 'thirty'],
+      ['age', null],
+    ] as const) {
+      const damaged = drifted();
+      (damaged.character as Record<string, unknown>)[key] = value;
+      write(storage, damaged);
+      expect(loadGame(storage, 1), `character.${key}`).toEqual({ ok: false, reason: 'corrupt' });
+    }
+  });
+
+  it('repairs the fields a life can resume from instead of refusing the save', () => {
+    /* The likely damage is not "this is not a save" but a save one field short —
+       a write truncated by a quota error, a hand-edited entry, a slot written by
+       a build that carried a field this one dropped. Every replacement below is
+       a value `createLife` already starts a life at, so resuming from one costs
+       a number rather than the life. */
+    const storage = memoryStorage();
+    const cases: { path: string; expected: unknown }[] = [
+      { path: 'character.money', expected: 0 },
+      { path: 'character.fame', expected: 0 },
+      { path: 'character.stats.health', expected: 50 },
+      { path: 'character.stats.happiness', expected: 50 },
+      { path: 'character.stats.smarts', expected: 50 },
+      { path: 'character.stats.looks', expected: 50 },
+      { path: 'character.assets', expected: [] },
+      { path: 'character.loans', expected: [] },
+      { path: 'character.illnesses', expected: [] },
+      { path: 'character.addictions', expected: {} },
+      { path: 'character.job', expected: null },
+      { path: 'character.prison', expected: null },
+      { path: 'character.education.level', expected: 'none' },
+      { path: 'character.education.year', expected: 0 },
+      { path: 'character.education.gpa', expected: 0 },
+      { path: 'character.investments.savings', expected: 0 },
+      { path: 'character.investments.index', expected: 0 },
+      { path: 'character.investments.crypto', expected: 0 },
+      { path: 'people', expected: {} },
+      { path: 'interactionUse', expected: {} },
+      { path: 'log', expected: [] },
+      { path: 'pending', expected: [] },
+      { path: 'firedEvents', expected: [] },
+      { path: 'ancestors', expected: [] },
+      { path: 'phase', expected: 'alive' },
+      { path: 'seed', expected: 0 },
+      { path: 'rngState', expected: initialRngState(42) },
+      { path: 'generation', expected: 1 },
+      { path: 'year', expected: 2025 },
+    ];
+
+    for (const { path, expected } of cases) {
+      for (const damage of ['delete', 'wrong type'] as const) {
+        const state = drifted();
+        const { parent, key } = at(state, path);
+        if (damage === 'delete') {
+          delete parent[key];
+        } else {
+          parent[key] = 'nope';
+        }
+        write(storage, state);
+
+        const res = loadGame(storage, 1);
+        expect(res.ok, `${path} (${damage})`).toBe(true);
+        if (!res.ok) {
+          continue;
+        }
+        // Exactly one field named: a repair may not cascade into its neighbours.
+        expect(res.repairs, `${path} (${damage})`).toEqual([path]);
+        const { parent: got, key: field } = at(
+          res.state as unknown as Record<string, unknown>,
+          path
+        );
+        expect(got[field], `${path} (${damage})`).toEqual(expected);
+      }
+    }
+  });
+
+  it('keeps a finished life finished and a legitimately absent field absent', () => {
+    /* Only an *unrecognised* phase is rewritten: resurrecting `dead` would deny
+       the player their death screen and their heir. `death` is the mirror case —
+       a living character has none, so absence must not read as damage. */
+    const storage = memoryStorage();
+    write(storage, drifted());
+    const clean = loadGame(storage, 1);
+    expect(clean.ok && clean.repairs).toBeUndefined();
+
+    const dead = drifted();
+    dead.phase = 'dead';
+    dead.death = { cause: 'old age', age: 80, obituary: 'Gone.', epitaphStats: {} };
+    write(storage, dead);
+    const res = loadGame(storage, 1);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.repairs).toBeUndefined();
+      expect(res.state.phase).toBe('dead');
+      expect(res.state.death?.cause).toBe('old age');
+    }
+
+    const damaged = drifted();
+    damaged.death = 'gone';
+    write(storage, damaged);
+    const dropped = loadGame(storage, 1);
+    expect(dropped.ok).toBe(true);
+    if (dropped.ok) {
+      expect(dropped.repairs).toEqual(['death']);
+      expect('death' in (dropped.state as unknown as Record<string, unknown>)).toBe(false);
+    }
+  });
+
+  it('heals a balance JSON could not carry', () => {
+    /* JSON has no NaN or Infinity: a poisoned balance comes back as `null`,
+       which `typeof` reads as an object and every affordability gate reads as
+       `false` — a wallet that can never buy anything again. */
+    const storage = memoryStorage();
+    const state = drifted();
+    // What `JSON.stringify` writes for `NaN` and `Infinity` alike.
+    (state.character as Record<string, unknown>).money = null;
+    write(storage, state);
+
+    const res = loadGame(storage, 1);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.state.character.money).toBe(0);
+      expect(res.repairs).toEqual(['character.money']);
+    }
+  });
+
+  it('hands the engine a state it can go on playing', () => {
+    /* The assertion that justifies repairing at all: the containers the year
+       loop walks unguarded — `state.log`, `state.people`, `state.pending` — are
+       all there again, so the load no longer reports success and then throws one
+       interaction later with no way back to the slot list. */
+    const storage = memoryStorage();
+    const state = drifted();
+    delete state.log;
+    delete state.people;
+    delete state.pending;
+    write(storage, state);
+
+    const res = loadGame(storage, 1);
+    expect(res.ok).toBe(true);
+    if (!res.ok) {
+      return;
+    }
+    expect(res.repairs).toEqual(['people', 'log', 'pending']);
+
+    const reg = buildRegistry([]);
+    const resumed = res.state;
+    expect(() => {
+      ageUp(resumed, reg);
+      ageUp(resumed, reg);
+    }).not.toThrow();
+    expect(resumed.log.length).toBeGreaterThan(0);
+  });
+
+  it('leaves a healthy save exactly as it was written', () => {
+    const storage = memoryStorage();
+    const state = fixture('Ada');
+    saveGame(storage, 1, state);
+    const res = loadGame(storage, 1);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      // Absent rather than empty, so "recovered" is a presence check.
+      expect('repairs' in res).toBe(false);
+      expect(res.state).toEqual(state);
+    }
+
+    // `job` and `prison` are legitimately null, never a repair.
+    saveGame(storage, 2, fixture('Ada', { character: { ...state.character, job: null } }));
+    const nulls = loadGame(storage, 2);
+    expect(nulls.ok && nulls.repairs).toBeUndefined();
+    expect(nulls.ok && nulls.state.character.job).toBeNull();
   });
 
   it('still reports a same-or-older save with a bad shape as corrupt', () => {
@@ -347,7 +522,9 @@ describe('migrations', () => {
 
     migrations[SAVE_VERSION] = (old: unknown): unknown => {
       const next = { ...(old as Record<string, unknown>) };
-      delete next.people;
+      const character = { ...(next.character as Record<string, unknown>) };
+      delete character.stats;
+      next.character = character;
       return next;
     };
 
@@ -356,6 +533,151 @@ describe('migrations', () => {
     } finally {
       delete migrations[SAVE_VERSION];
     }
+  });
+
+  it('repairs what the chain produced as well, and names what it filled in', () => {
+    /* The repair half of the same rule: a step that drops a container the engine
+       can resume from must leave the save playable rather than deletable, and
+       must still name what it filled in, so an unfinished migration reads as a
+       recovered save rather than a clean one. */
+    const storage = memoryStorage();
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION - 1, savedAt: 1, slot: 1, state: fixture('Ada') })
+    );
+
+    migrations[SAVE_VERSION] = (old: unknown): unknown => {
+      const next = { ...(old as Record<string, unknown>) };
+      delete next.people;
+      return next;
+    };
+
+    try {
+      const res = loadGame(storage, 1);
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.repairs).toEqual(['people']);
+        expect(res.state.people).toEqual({});
+      }
+    } finally {
+      delete migrations[SAVE_VERSION];
+    }
+  });
+
+  it('walks a two-step chain in order, running each step exactly once', () => {
+    /* `SAVE_VERSION` is 1 and `migrations` is empty, so nothing in shipped play
+       has ever made more than the zero hops a current save makes. The versions
+       below are faked because `SAVE_VERSION` is a `const` a test cannot bump:
+       what is rehearsed here is the walk, not the number. */
+    const storage = memoryStorage();
+    const modern = fixture('Ada');
+    const ancient: Record<string, unknown> = { ...modern };
+    delete ancient.log;
+    delete ancient.character;
+    ancient.entries = modern.log;
+    ancient.hero = modern.character;
+    storage.setItem(
+      'ol.save.1',
+      JSON.stringify({ version: SAVE_VERSION - 2, savedAt: 1, slot: 1, state: ancient })
+    );
+
+    const handedOver: Record<string, unknown>[] = [];
+    migrations[SAVE_VERSION - 1] = (old: unknown): unknown => {
+      const rec = old as Record<string, unknown>;
+      handedOver.push(rec);
+      const { entries, ...rest } = rec;
+      return { ...rest, log: entries };
+    };
+    migrations[SAVE_VERSION] = (old: unknown): unknown => {
+      const rec = old as Record<string, unknown>;
+      handedOver.push(rec);
+      const { hero, ...rest } = rec;
+      return { ...rest, character: hero };
+    };
+
+    try {
+      expect(loadedState(storage, 1)).toEqual(modern);
+      // One hop each, oldest first: the first step read the stored payload...
+      expect(handedOver).toHaveLength(2);
+      expect(handedOver[0].entries).toEqual(modern.log);
+      // ...and the second read what the first returned, not what was stored.
+      expect(handedOver[1].log).toEqual(modern.log);
+      expect('entries' in handedOver[1]).toBe(false);
+      /* Between the two steps the state is no life at all: the shape gate runs
+         once, after the last step, so a step may hand the next one a payload
+         with `character` still missing. */
+      expect('character' in handedOver[1]).toBe(false);
+    } finally {
+      delete migrations[SAVE_VERSION - 1];
+      delete migrations[SAVE_VERSION];
+    }
+  });
+
+  it('drives the chain without going through storage', () => {
+    /* The seam the rehearsals lean on: `SAVE_VERSION` is a `const`, so the only
+       way to exercise an upgrade is to hand `migrate` a version directly. */
+    const current = fixture('Ada');
+    // Nothing to walk: a save already at this version is handed straight back.
+    expect(migrate(current, SAVE_VERSION)?.state).toBe(current);
+
+    migrations[SAVE_VERSION] = (old: unknown): unknown => ({
+      ...(old as Record<string, unknown>),
+      year: 2099,
+    });
+    try {
+      expect(migrate({ year: 2031 }, SAVE_VERSION - 1)?.state).toEqual({ year: 2099 });
+      /* A gap two hops down: the walk stops at the first missing step instead of
+         skipping it, so the save is refused rather than half-migrated. */
+      expect(migrate({ year: 2031 }, SAVE_VERSION - 2)).toBeNull();
+    } finally {
+      delete migrations[SAVE_VERSION];
+    }
+  });
+
+  it('has a step for every version gap it will ever have to cross', () => {
+    /* Vacuous while `SAVE_VERSION` is 1 and live from 2 onward, which is exactly
+       when it is needed: the mistake it catches is bumping the version and
+       shipping without the step, which turns every existing player's save into
+       `corrupt` — a verdict the load menu offers next to a Delete button. */
+    for (let from = 1; from < SAVE_VERSION; from += 1) {
+      expect(migrations[from + 1], `missing migration to version ${String(from + 1)}`).toBeTypeOf(
+        'function'
+      );
+    }
+    // Asked the way the loader asks it: the oldest save this build can meet arrives.
+    expect(migrate(fixture('Ada'), 1)).not.toBeNull();
+  });
+
+  it('registers every step under the version it upgrades to', () => {
+    /* The same mistake spelled the other way round: a step keyed by the version
+       it upgrades *from* is never looked up, so the save it was written for
+       reports `corrupt` with its own fix sitting in the file. Nothing upgrades
+       *to* version 1 — there is no version 0 to come from — and nothing above
+       `SAVE_VERSION` is ever reached. */
+    for (const key of Object.keys(migrations)) {
+      const to = Number(key);
+      expect(Number.isInteger(to), `migrations[${key}] is not keyed by a version`).toBe(true);
+      expect(to >= 2 && to <= SAVE_VERSION, `migrations[${key}] is never reached`).toBe(true);
+    }
+  });
+});
+
+/* The persistence contract, asserted rather than described: four `ol.*` keys,
+   all of them named here. The sidecar is the store's to read and write — its
+   payload is a content type — but a key this module cannot name is a key it
+   cannot erase. */
+describe('storage keys', () => {
+  it('writes each of the four under its documented name', () => {
+    const storage = memoryStorage();
+    expect(slotKey(3)).toBe('ol.save.3');
+    expect(tableKey(3)).toBe('ol.table.3');
+
+    saveGame(storage, 3, fixture('Ada'));
+    expect(storage.getItem('ol.save.3')).not.toBeNull();
+    saveUnlockedAchievements(storage, ['ach.rich']);
+    expect(storage.getItem('ol.achievements')).not.toBeNull();
+    saveSettings(storage, { theme: 'dark', reduceMotion: true });
+    expect(storage.getItem('ol.settings')).not.toBeNull();
   });
 });
 
@@ -366,6 +688,24 @@ describe('deleteSave', () => {
     saveGame(storage, 2, fixture('Grace'));
     deleteSave(storage, 1);
     expect(loadGame(storage, 1)).toEqual({ ok: false, reason: 'empty' });
+    expect(loadedState(storage, 2).character.firstName).toBe('Grace');
+  });
+
+  it("erases the slot's blackjack sidecar along with the save", () => {
+    const storage = memoryStorage();
+    saveGame(storage, 1, fixture('Ada'));
+    saveGame(storage, 2, fixture('Grace'));
+    /* An unfinished hand, as the store parks one: the stake behind it is
+       charged in the save beside it, so a sidecar that outlives that save is
+       restored on top of whatever life the slot holds next. */
+    storage.setItem(tableKey(1), '{"bet":50,"done":false}');
+    storage.setItem(tableKey(2), '{"bet":10,"done":false}');
+
+    deleteSave(storage, 1);
+
+    expect(storage.getItem(tableKey(1))).toBeNull();
+    // One slot's worth of state, not the sidecar shelf.
+    expect(storage.getItem(tableKey(2))).toBe('{"bet":10,"done":false}');
     expect(loadedState(storage, 2).character.firstName).toBe('Grace');
   });
 });
@@ -393,6 +733,8 @@ describe('listSlots', () => {
     expect(summary?.generation).toBe(2);
     expect(summary?.dead).toBe(false);
     expect(typeof summary?.savedAt).toBe('number');
+    // A slot this build opens carries no warning at all, not a false one.
+    expect(summary?.unreadable).toBeUndefined();
   });
 
   it('marks a finished life as dead', () => {
@@ -418,7 +760,14 @@ describe('listSlots', () => {
     const slots = listSlots(storage);
     for (const slot of [1, 2, 3]) {
       expect(loadGame(storage, slot)).toEqual({ ok: false, reason: 'future' });
-      expect(slots.find((s) => s.slot === slot)).toEqual({ slot, empty: false, savedAt: slot });
+      /* Flagged, not merely occupied: an unlabelled row that reads like any
+         other save is the one the player replaces without meaning to. */
+      expect(slots.find((s) => s.slot === slot)).toEqual({
+        slot,
+        empty: false,
+        savedAt: slot,
+        unreadable: 'future',
+      });
     }
   });
 
@@ -431,8 +780,12 @@ describe('listSlots', () => {
 
     const summary = listSlots(storage).find((s) => s.slot === 1);
     expect(summary?.empty).toBe(false);
+    /* The life keeps its details next to the warning: this save is healthy
+       data an older build simply cannot open, and the row saying whose life it
+       is is what keeps the warning from reading as "this one is gone". */
     expect(summary?.name).toBe('Ada Byron');
     expect(summary?.age).toBe(34);
+    expect(summary?.unreadable).toBe('future');
   });
 
   it('reports no name at all when the stored character has none', () => {
@@ -501,6 +854,11 @@ describe('listSlots', () => {
       expect(loadGame(storage, target), raw).toEqual({ ok: false, reason: 'corrupt' });
       const summary = listSlots(storage).find((s) => s.slot === target);
       expect(summary?.empty, raw).toBe(false);
+      /* Occupied answers "do not overwrite this"; `damaged` answers "and here
+         is why", so the row can say so instead of posing as a save the menu
+         merely knows nothing about. Every payload here is one `loadGame` has
+         already refused above, so the flag promises nothing it cannot keep. */
+      expect(summary?.unreadable, raw).toBe('damaged');
       /* Nothing was read out of the payload, so the row has no life to describe:
          the load menu reads the missing details as "could not be read" rather
          than captioning the slot `Age 0 · Gen 1 · $0`. */
@@ -538,6 +896,9 @@ describe('listSlots', () => {
 
     try {
       expect(loadGame(storage, 1).ok).toBe(true);
+      /* Unflagged as well as occupied: the step registered above is exactly
+         what the shallow read is missing, so calling this row damaged would
+         accuse a save the chain loads fine. */
       expect(listSlots(storage).find((s) => s.slot === 1)).toEqual({
         slot: 1,
         empty: false,
@@ -546,6 +907,74 @@ describe('listSlots', () => {
     } finally {
       delete migrations[SAVE_VERSION];
     }
+  });
+
+  it('flags a save the version stamp alone rules out', () => {
+    /* The mirror of the case above, and the reason the flag reads the stamp
+       before the payload: with no step to reach `SAVE_VERSION` — and with no
+       stamp at all — `loadGame` refuses whatever the state turns out to hold,
+       so the row can say so even though it read the life out fine. */
+    const storage = memoryStorage();
+    saveGame(storage, 1, fixture('Ada'));
+    saveGame(storage, 2, fixture('Grace'));
+
+    const legacy = readRaw(storage, 1);
+    legacy.version = SAVE_VERSION - 1;
+    storage.setItem('ol.save.1', JSON.stringify(legacy));
+    const unstamped = readRaw(storage, 2);
+    delete unstamped.version;
+    storage.setItem('ol.save.2', JSON.stringify(unstamped));
+
+    const slots = listSlots(storage);
+    for (const [slot, name] of [
+      [1, 'Ada Byron'],
+      [2, 'Grace Byron'],
+    ] as const) {
+      expect(loadGame(storage, slot)).toEqual({ ok: false, reason: 'corrupt' });
+      const summary = slots.find((s) => s.slot === slot);
+      expect(summary?.empty, name).toBe(false);
+      expect(summary?.name, name).toBe(name);
+      expect(summary?.unreadable, name).toBe('damaged');
+    }
+  });
+
+  it('flags exactly the current-version payloads the loader refuses', () => {
+    /* The row and the load cannot be allowed to disagree: a warning on a save
+       that opens fine trains the player to ignore it, and a clean row on one
+       that does not is how a damaged save gets replaced. For an envelope no
+       migration reshapes, this is the loader's own predicate answering. */
+    const storage = memoryStorage();
+    const healthy = fixture('Ada');
+    const noStats = { ...healthy, character: { ...healthy.character } };
+    delete (noStats.character as Partial<GameState['character']>).stats;
+    const noLog = { ...healthy };
+    delete (noLog as Partial<GameState>).log;
+    const states: unknown[] = [healthy, noLog, noStats, { hero: {} }, 7, null];
+
+    states.forEach((state, i) => {
+      storage.setItem(
+        'ol.save.1',
+        JSON.stringify({ version: SAVE_VERSION, savedAt: 1, slot: 1, state })
+      );
+      const row = listSlots(storage).find((s) => s.slot === 1);
+      expect(row?.unreadable === undefined, `state ${String(i)}`).toBe(loadGame(storage, 1).ok);
+    });
+  });
+
+  it('leaves a save the loader repairs on its way in unflagged', () => {
+    /* The flag means "`loadGame` will refuse this", not "something is off":
+       damage the repair path absorbs must not cost the row its ordinary
+       caption, or every recoverable save would wear a warning it outgrew. */
+    const storage = memoryStorage();
+    saveGame(storage, 1, fixture('Ada'));
+    const env = readRaw(storage, 1);
+    delete (env.state as Record<string, unknown>).log;
+    storage.setItem('ol.save.1', JSON.stringify(env));
+
+    expect(loadGame(storage, 1).ok).toBe(true);
+    const summary = listSlots(storage).find((s) => s.slot === 1);
+    expect(summary?.name).toBe('Ada Byron');
+    expect(summary?.unreadable).toBeUndefined();
   });
 });
 

@@ -8,11 +8,13 @@
  * into through `applyToSchool`.
  */
 
-import { currentYearLog } from '@/engine/ageUp';
 import { clampMoney, clampStat } from '@/engine/effects';
+import { currentYearLog } from '@/engine/log';
 /* Finance owns loans, and student debt shares the id counter with every other
    loan, so the id comes from there rather than from a second minting rule. */
 import { mintLoanId } from '@/engine/phases/finance';
+import { findById } from '@/engine/registry';
+import { LEVEL_ORDER, hasAtLeast, isDegreeLevel } from '@/engine/rules';
 import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
   ContentRegistry,
@@ -55,34 +57,13 @@ const STUDY_SMARTS_GAIN = 1;
 /** Set while a degree is being financed so the loan notice is logged only once. */
 const LOAN_NOTICE_FLAG = 'studentLoanLogged';
 
-/** Ranking used for "at least this much schooling" checks. */
-const LEVEL_ORDER: Record<EdLevel, number> = {
-  none: 0,
-  primary: 1,
-  middle: 2,
-  high: 3,
-  university: 4,
-  postgrad: 5,
-};
-
-function hasAtLeast(level: EdLevel, needed: EdLevel): boolean {
-  return LEVEL_ORDER[level] >= LEVEL_ORDER[needed];
-}
-
-/* Registry maps are typed as total records, so widen before lookup: a hand-built
-   or partially loaded registry can still miss the id we ask for. */
 function findSchool(reg: ContentRegistry, id: string): SchoolDef | undefined {
-  const byId: Record<string, SchoolDef | undefined> = reg.schoolsById;
-  return byId[id] ?? reg.schools.find((school) => school.id === id);
+  return findById(reg.schoolsById, reg.schools, id);
 }
 
 /** Content guarantees exactly one school per compulsory level. */
 function schoolAtLevel(reg: ContentRegistry, level: EdLevel): SchoolDef | undefined {
   return reg.schools.find((school) => school.level === level);
-}
-
-function isDegree(def: SchoolDef): boolean {
-  return def.level === 'university' || def.level === 'postgrad';
 }
 
 /**
@@ -246,7 +227,9 @@ export function educationPhase(ctx: Ctx): LogEntry[] {
   }
 
   const entries =
-    enrolled && isDegree(enrolled) ? advanceDegree(ctx, enrolled) : advanceCompulsory(ctx);
+    enrolled && isDegreeLevel(enrolled.level)
+      ? advanceDegree(ctx, enrolled)
+      : advanceCompulsory(ctx);
 
   // Grades and study drift belong to whatever school the year ends inside.
   if (ed.enrolledIn !== undefined) {
@@ -284,7 +267,7 @@ export function applyToSchool(
   const def = findSchool(reg, schoolId);
 
   if (!def) return { ok: false, reason: 'That school does not exist.' };
-  if (!isDegree(def)) return { ok: false, reason: 'That school enrols by age.' };
+  if (!isDegreeLevel(def.level)) return { ok: false, reason: 'That school enrols by age.' };
 
   /* The same reconciliation `educationPhase` performs, because a save is loaded
      into the Education sheet long before the next `ageUp` runs it: a desk no def

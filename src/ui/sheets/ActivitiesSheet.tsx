@@ -7,18 +7,9 @@ import { availableInteractions } from '@/engine/interactions';
 import { useGameStore } from '@/store/gameStore';
 import { useUiStore } from '@/store/uiStore';
 import type { InteractionDef } from '@/types';
+import { ACTIVITY_SECTIONS } from '@/ui/lib/areas';
 import { gateFor } from '@/ui/lib/feed';
 import { SheetChrome } from '@/ui/sheets/SheetChrome';
-
-/* Fixed section order; empty sections vanish, which is how underage looks. */
-const SECTIONS: [string, string][] = [
-  ['mind-body', 'Mind & Body'],
-  ['fun', 'Fun'],
-  ['shopping', 'Shopping'],
-  ['nightlife', 'Nightlife'],
-  ['pets', 'Pets'],
-  ['travel', 'Travel'],
-];
 
 const listGroupStyle: CSSProperties = {
   background: 'var(--bg-elevated)',
@@ -38,7 +29,10 @@ export function ActivitiesSheet(): ReactElement | null {
   }
 
   const reg = getRegistry();
-  const groups = SECTIONS.map(([area, label]): [string, InteractionDef[]] => [
+  /* Fixed section order, from the list every routed area is declared on so a
+     lint can check the whole routing table at once; an empty section vanishes
+     rather than rendering a header over nothing, which is how underage looks. */
+  const groups = ACTIVITY_SECTIONS.map(([area, label]): [string, InteractionDef[]] => [
     label,
     availableInteractions(game, reg, area),
   ]).filter(([, defs]) => defs.length > 0);

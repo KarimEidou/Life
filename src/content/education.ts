@@ -7,6 +7,7 @@
  * programme it is the list of undergrad majors that programme accepts.
  */
 
+import { MILESTONE, free, inSchool } from '@/content/lib';
 import type { ContentPack, Ctx, EventDef, SchoolDef } from '@/types';
 
 /** The eight shared majors. University teaches all of them. */
@@ -95,14 +96,6 @@ const schools: SchoolDef[] = [
 const GRADUATION_AGE = 18;
 
 /**
- * Every event below is school life, so it needs a desk to happen at. A prison
- * cell is not one: a sentence keeps the enrolment record but ends attendance.
- */
-function inSchool(ctx: Ctx): boolean {
-  return ctx.c.education.enrolledIn !== undefined && !ctx.c.prison;
-}
-
-/**
  * In school, or standing in the year high school ended.
  *
  * The education phase runs 3rd and the events phase 7th, so the year the diploma
@@ -115,7 +108,7 @@ function inSchool(ctx: Ctx): boolean {
 function inSchoolOrGraduating(ctx: Ctx): boolean {
   const c = ctx.c;
   if (inSchool(ctx)) return true;
-  return c.age === GRADUATION_AGE && c.education.level === 'high' && !c.prison;
+  return c.age === GRADUATION_AGE && c.education.level === 'high' && free(ctx);
 }
 
 const events: EventDef[] = [
@@ -125,7 +118,7 @@ const events: EventDef[] = [
     icon: '🐝',
     minAge: 7,
     maxAge: 11,
-    weight: 4,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: inSchool,
     text: (ctx) =>
@@ -214,7 +207,7 @@ const events: EventDef[] = [
     icon: '🔬',
     minAge: 10,
     maxAge: 14,
-    weight: 4,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: inSchool,
     text: (ctx) =>
@@ -324,7 +317,7 @@ const events: EventDef[] = [
     minAge: 16,
     // 17, not 18: see `ev-school-cheat`.
     maxAge: 17,
-    weight: 5,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: inSchool,
     text: 'Prom is in two weeks and the posters are everywhere.',
@@ -384,7 +377,7 @@ const events: EventDef[] = [
     icon: '🎓',
     minAge: 17,
     maxAge: 18,
-    weight: 6,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: (ctx) => inSchoolOrGraduating(ctx) && ctx.c.education.gpa >= 3.8,
     text: 'You were named valedictorian. You wrote the speech at 2am and it landed anyway.',
@@ -445,7 +438,7 @@ const events: EventDef[] = [
     icon: '📖',
     minAge: 17,
     maxAge: 18,
-    weight: 5,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: inSchoolOrGraduating,
     text: 'You signed forty yearbooks with "stay cool, never change" and were voted Most Likely To Vanish.',

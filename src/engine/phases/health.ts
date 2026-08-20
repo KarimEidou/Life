@@ -26,6 +26,7 @@
  */
 
 import { clampMoney, clampStat } from '@/engine/effects';
+import { findById } from '@/engine/registry';
 import type {
   AddictionKey,
   ContentRegistry,
@@ -82,11 +83,9 @@ function alarmFlag(key: AddictionKey): string {
   return `addictionAlarm.${key}`;
 }
 
-/* Registry maps are typed as total records, so widen before lookup: a save can
-   outlive the content that defined one of its illnesses. */
+/* A save can outlive the content that defined one of its illnesses. */
 function findIllness(reg: ContentRegistry, id: string): IllnessDef | undefined {
-  const byId: Record<string, IllnessDef | undefined> = reg.illnessesById;
-  return byId[id] ?? reg.illnesses.find((def) => def.id === id);
+  return findById(reg.illnessesById, reg.illnesses, id);
 }
 
 /** Yearly odds of recovering: the def's own chance, doubled by treatment. */

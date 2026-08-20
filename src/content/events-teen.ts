@@ -11,46 +11,22 @@
  * here asks `free` first — either directly or through `inSchool`.
  */
 
-import { addPerson } from '@/engine/state';
-import type {
-  ContentPack,
-  Ctx,
-  Effect,
-  EffectCtx,
-  EventDef,
-  Gender,
-  NamePool,
-  Person,
-  RelKind,
-} from '@/types';
-
-/** Genders a generated person is rolled as. */
-const GENDERS: readonly Gender[] = ['male', 'female'];
-
-/** Keeps an affinity inside the 0..100 the engine stores, healing the way
- *  `clampStat` does: an unreadable `rel` out of a drifted save settles at 0
- *  rather than being written back, because `relationshipsPhase.drift` carries a
- *  NaN affinity forward untouched (`Math.max(0, NaN)`) for every kin this
- *  touches, so a poisoned one would never recover. */
-function clampRel(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
-  return Math.round(bounded * 10) / 10;
-}
-
-/** Every living person of one relationship kind, in the order they joined the life. */
-function livingKin(people: Record<string, Person>, kind: RelKind): Person[] {
-  return Object.values(people).filter((person) => person.alive && person.kind === kind);
-}
-
-function hasParent(ctx: Ctx): boolean {
-  const people = ctx.state.people;
-  return livingKin(people, 'mother').length > 0 || livingKin(people, 'father').length > 0;
-}
-
-function hasSibling(ctx: Ctx): boolean {
-  return livingKin(ctx.state.people, 'sibling').length > 0;
-}
+import {
+  MILESTONE,
+  MILESTONE_ONE_YEAR,
+  ROLLED_GENDERS,
+  addPerson,
+  free,
+  hasParent,
+  hasSibling,
+  inSchool,
+  livingKin,
+  parentsRel,
+  rollName,
+  siblingName,
+  siblingRel,
+} from '@/content/lib';
+import type { ContentPack, Ctx, Effect, EffectCtx, EventDef } from '@/types';
 
 /** A dateable teenager is one who is not already attached. */
 function isSingle(ctx: Ctx): boolean {
@@ -58,73 +34,12 @@ function isSingle(ctx: Ctx): boolean {
   return livingKin(people, 'partner').length === 0 && livingKin(people, 'spouse').length === 0;
 }
 
-/** Not behind bars. The prison pack owns those years, so anything out in the
- *  world asks this first. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
-
-/** Every school-life event needs a desk to happen at; a cell is not one. */
-function inSchool(ctx: Ctx): boolean {
-  return free(ctx) && ctx.c.education.enrolledIn !== undefined;
-}
-
-/** The sibling the texts name and the effects hit: always the first one listed. */
-function firstSibling(people: Record<string, Person>): Person | undefined {
-  return livingKin(people, 'sibling')[0];
-}
-
-/** Given name of the first living sibling, or a neutral stand-in. */
-function siblingName(ctx: Ctx): string {
-  const sibling = firstSibling(ctx.state.people);
-  if (!sibling) return 'Your sibling';
-  const given = sibling.name.split(' ')[0];
-  return given.length > 0 ? given : sibling.name;
-}
-
-/** Nudges every living parent; a no-op when both are gone. */
-function parentsRel(delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      for (const person of Object.values(ctx.state.people)) {
-        if (!person.alive) continue;
-        if (person.kind === 'mother' || person.kind === 'father') {
-          person.rel = clampRel(person.rel + delta);
-        }
-      }
-    },
-  };
-}
-
-/** Nudges the sibling the surrounding text named; a no-op when there is none. */
-function siblingRel(delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      const sibling = firstSibling(ctx.state.people);
-      if (sibling) sibling.rel = clampRel(sibling.rel + delta);
-    },
-  };
-}
-
-/** A plausible full name for the character's country, with a safe fallback. */
-function rollName(ctx: EffectCtx, gender: Gender): string {
-  // Widened like every other registry lookup: a partial registry can miss the key.
-  const pools: Record<string, NamePool | undefined> = ctx.reg.namePools;
-  const pool = pools[ctx.state.character.countryId];
-  const given = gender === 'female' ? pool?.female : pool?.male;
-  const first = given && given.length > 0 ? ctx.rng.pick(given) : 'Alex';
-  const last = pool && pool.last.length > 0 ? ctx.rng.pick(pool.last) : 'Doe';
-  return `${first} ${last}`;
-}
-
 /** Mints a classmate of roughly the character's own age. */
 function addPeer(kind: 'friend' | 'partner', relMin: number, relMax: number): Effect {
   return {
     kind: 'fn',
     run: (ctx: EffectCtx) => {
-      const gender = ctx.rng.pick(GENDERS);
+      const gender = ctx.rng.pick(ROLLED_GENDERS);
       addPerson(ctx.state, {
         kind,
         name: rollName(ctx, gender),
@@ -839,7 +754,7 @@ const events: EventDef[] = [
     icon: '🪪',
     minAge: 15,
     maxAge: 16,
-    weight: 5,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: free,
     text: 'You passed the written test and got your learner permit. The photo is permanent.',
@@ -887,7 +802,7 @@ const events: EventDef[] = [
     icon: '💵',
     minAge: 15,
     maxAge: 17,
-    weight: 5,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: (ctx) => free(ctx) && ctx.c.job !== null,
     text: 'Your first real paycheck. Taxes took a bite and you took it personally.',
@@ -1036,7 +951,7 @@ const events: EventDef[] = [
     icon: '🚙',
     minAge: 16,
     maxAge: 17,
-    weight: 5,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: (ctx) => free(ctx) && hasParent(ctx),
     text: (ctx) =>
@@ -1102,7 +1017,7 @@ const events: EventDef[] = [
     icon: '🚘',
     minAge: 16,
     maxAge: 17,
-    weight: 4,
+    weight: MILESTONE,
     oncePerLife: true,
     condition: inSchool,
     text: "Somebody's cousin is hosting a pre-prom party in a basement two hours before the dance.",
@@ -1162,7 +1077,7 @@ const events: EventDef[] = [
     icon: '✍️',
     minAge: 17,
     maxAge: 17,
-    weight: 4,
+    weight: MILESTONE_ONE_YEAR,
     oncePerLife: true,
     condition: inSchool,
     text: 'The yearbook wants your quote by Friday, and it is permanent.',
@@ -1219,7 +1134,7 @@ const events: EventDef[] = [
     icon: '😰',
     minAge: 17,
     maxAge: 17,
-    weight: 5,
+    weight: MILESTONE_ONE_YEAR,
     oncePerLife: true,
     condition: inSchool,
     text:

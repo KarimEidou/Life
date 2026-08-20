@@ -1,19 +1,31 @@
-import { clampMoney } from '@/engine/effects';
-import { addPerson } from '@/engine/state';
+import {
+  ROLLED_GENDERS,
+  addPerson,
+  alivePeople,
+  bestFriend,
+  childAged,
+  clampMoney,
+  clampStat,
+  firstNameOf,
+  firstOfKind,
+  free,
+  relWith,
+  rollFirstName,
+  rollLastName,
+  romanceOf,
+  withPerson,
+} from '@/content/lib';
+import type { RollCtx } from '@/content/lib';
 import type {
   ContentPack,
-  ContentRegistry,
   Ctx,
   Effect,
   EffectCtx,
   EventDef,
-  GameState,
   Gender,
   InteractionDef,
-  NamePool,
   Person,
   RelKind,
-  Rng,
   Stats,
 } from '@/types';
 
@@ -29,17 +41,20 @@ import type {
  *
  * Events are worse: a card is dealt in one phase and answered in another, so an
  * outcome's `fn` re-finds its person and quietly does nothing when they are gone.
+ *
+ * This pack straddles the prison policy documented above `free` in
+ * `@/content/lib`, and is the reason it is written down: talking to somebody,
+ * insulting them, asking them for money, signing divorce papers and cutting a
+ * child out of the will are words, paper and money between people the life
+ * already holds, so they survive a sentence — `ev-prison-visiting-day` says as
+ * much. A restaurant proposal, a coffee with an ex, a bought gift, a prank
+ * staged in somebody's house and a stranger met in a queue all need the world
+ * outside, so they ask `free`.
  */
 
 /* ------------------------------------------------------------------ */
 /* Lookups                                                             */
 /* ------------------------------------------------------------------ */
-
-/** Everyone still alive. Widened first: a loaded save can hold a hole. */
-function alivePeople(state: GameState): Person[] {
-  const list: (Person | undefined)[] = Object.values(state.people);
-  return list.filter((p): p is Person => p !== undefined && p.alive === true);
-}
 
 const ANYONE: readonly RelKind[] = [
   'mother',
@@ -68,43 +83,6 @@ const PEOPLE: readonly RelKind[] = [
 ];
 
 const ROMANCE: readonly RelKind[] = ['partner', 'spouse'];
-
-/** The current spouse, else the current partner, else nobody. */
-function romanceOf(state: GameState): Person | undefined {
-  const alive = alivePeople(state);
-  return alive.find((p) => p.kind === 'spouse') ?? alive.find((p) => p.kind === 'partner');
-}
-
-function firstOfKind(state: GameState, kind: RelKind): Person | undefined {
-  return alivePeople(state).find((p) => p.kind === kind);
-}
-
-/** The friend who would notice if you vanished: highest affinity, alive. */
-function bestFriend(state: GameState): Person | undefined {
-  const friends = alivePeople(state).filter((p) => p.kind === 'friend');
-  return friends.reduce<Person | undefined>(
-    (best, p) => (best === undefined || p.rel > best.rel ? p : best),
-    undefined
-  );
-}
-
-function childAged(state: GameState, minAge: number, maxAge: number): Person | undefined {
-  return alivePeople(state).find(
-    (p) => p.kind === 'child' && p.age >= minAge && p.age <= maxAge
-  );
-}
-
-/** The name a sentence should call somebody, never an empty string. */
-function firstNameOf(person: Person, fallback = 'them'): string {
-  const parts = person.name.trim().split(/\s+/);
-  return parts[0] || fallback;
-}
-
-/** Not behind bars. The prison pack owns those years, so anything out in the
- *  world asks this first. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
 
 /* ------------------------------------------------------------------ */
 /* Target gates                                                        */
@@ -148,96 +126,15 @@ function noTarget(refund = 0): { text: string; effects: Effect[] } {
 /* Effect helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-/** Same 0..100 rounding the engine applies, for the fields it does not own. */
-function clamped(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const bounded = n < 0 ? 0 : n > 100 ? 100 : n;
-  return Math.round(bounded * 10) / 10;
-}
-
-/**
- * Runs against one person by id, or does nothing.
- *
- * An interaction's effects land a moment after `resolve` picked its person, and
- * an event outcome lands a whole phase after its card was dealt — either way the
- * table is re-read here rather than trusted. Own-property only: the id came from
- * data, so `__proto__` must resolve to nobody.
- */
-function withPerson(id: string, run: (person: Person, ctx: EffectCtx) => void): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      const people = ctx.state.people;
-      if (!Object.prototype.hasOwnProperty.call(people, id)) return;
-      const person: Person | undefined = people[id];
-      if (!person) return;
-      run(person, ctx);
-    },
-  };
-}
-
-/**
- * Moves affinity with whoever a picker finds when the effect lands.
- * `{kind:'rel'}` addresses people by sentinel or explicit id, and neither names
- * "the sibling this card was about", so those land here instead.
- */
-function relWith(pick: (state: GameState) => Person | undefined, delta: number): Effect {
-  return {
-    kind: 'fn',
-    run: (ctx: EffectCtx) => {
-      const person = pick(ctx.state);
-      if (!person) return;
-      person.rel = clamped(person.rel + delta);
-    },
-  };
-}
-
 /* ------------------------------------------------------------------ */
 /* Minting people                                                      */
 /* ------------------------------------------------------------------ */
-
-/** Everything the name and stat rollers need; `Ctx` and `EffectCtx` both fit. */
-interface RollCtx {
-  state: GameState;
-  rng: Rng;
-  reg: ContentRegistry;
-}
-
-const ROLLED_GENDERS: readonly Gender[] = ['male', 'female'];
-
-function poolFor(ctx: RollCtx): NamePool | undefined {
-  const pools: Record<string, NamePool | undefined> = ctx.reg.namePools;
-  return pools[ctx.state.character.countryId];
-}
-
-/**
- * A plausible local given name, or a neutral stand-in when no pool is loaded.
- *
- * `taken` drops a name already spoken for by a sibling minted in the same
- * breath, so twins under one surname cannot answer to the same name. It costs
- * no extra draw — the pick is still exactly one, whatever the list ends up
- * holding — and a name this pool never held filters nothing out, so a birth
- * that could not have collided rolls exactly as it did before.
- */
-function rollFirstName(ctx: RollCtx, gender: Gender, taken?: string): string {
-  const pool = poolFor(ctx);
-  const all = gender === 'female' ? pool?.female : pool?.male;
-  const given = taken === undefined ? all : all?.filter((name) => name !== taken);
-  if (given && given.length > 0) return ctx.rng.pick(given);
-  return gender === 'female' ? 'Riley' : 'Alex';
-}
-
-function rollLastName(ctx: RollCtx): string {
-  const pool = poolFor(ctx);
-  if (pool && pool.last.length > 0) return ctx.rng.pick(pool.last);
-  return ctx.state.character.lastName || 'Doe';
-}
 
 /** A child's opening hand: half the character, half whoever the other parent was. */
 function babyStats(ctx: RollCtx): Stats {
   const own = ctx.state.character.stats;
   const mix = (mine: number, lo: number, hi: number): number =>
-    clamped((mine + ctx.rng.int(lo, hi)) / 2 + ctx.rng.int(-4, 4));
+    clampStat((mine + ctx.rng.int(lo, hi)) / 2 + ctx.rng.int(-4, 4));
   return {
     health: mix(own.health, 70, 100),
     happiness: mix(own.happiness, 60, 95),
@@ -352,7 +249,8 @@ const interactions: InteractionDef[] = [
     label: 'Give a Gift',
     icon: '🎁',
     cost: 100,
-    condition: needs(ANYONE),
+    // A bought object handed over: $100 of shop, so the sentence takes it away.
+    condition: (ctx: Ctx) => free(ctx) && needs(ANYONE)(ctx),
     resolve: (ctx: Ctx) => {
       const t = targetOfKind(ctx, ANYONE);
       if (!t) return noTarget(100);
@@ -427,7 +325,8 @@ const interactions: InteractionDef[] = [
     label: 'Prank',
     icon: '🤡',
     minAge: 5,
-    condition: needs(PEOPLE),
+    // Staged in their house, in their shoes: further in than a conversation goes.
+    condition: (ctx: Ctx) => free(ctx) && needs(PEOPLE)(ctx),
     resolve: (ctx: Ctx) => {
       const t = targetOfKind(ctx, PEOPLE);
       if (!t) return noTarget();
@@ -514,7 +413,8 @@ const interactions: InteractionDef[] = [
     label: 'Propose',
     icon: '💍',
     minAge: 18,
-    condition: needs(['partner'], (p) => p.rel > 55),
+    // The restaurant that claps is the restaurant that gates it.
+    condition: (ctx: Ctx) => free(ctx) && needs(['partner'], (p) => p.rel > 55)(ctx),
     resolve: (ctx: Ctx) => {
       const t = targetOfKind(ctx, ['partner']);
       if (!t || t.rel <= 55) return noTarget();
@@ -526,7 +426,7 @@ const interactions: InteractionDef[] = [
           effects: [
             withPerson(t.id, (person) => {
               if (person.kind === 'partner') person.kind = 'spouse';
-              person.rel = clamped(person.rel + 10);
+              person.rel = clampStat(person.rel + 10);
               person.flags.married = true;
             }),
             { kind: 'stat', stat: 'happiness', delta: 20 },
@@ -668,7 +568,7 @@ const interactions: InteractionDef[] = [
         effects: [
           withPerson(t.id, (person) => {
             person.kind = 'ex';
-            person.rel = clamped(person.rel - 20);
+            person.rel = clampStat(person.rel - 20);
           }),
           {
             kind: 'fn',
@@ -694,7 +594,8 @@ const interactions: InteractionDef[] = [
     icon: '🕊️',
     minAge: 16,
     cooldownYears: 1,
-    condition: (ctx: Ctx) => romanceOf(ctx.state) === undefined && needs(['ex'])(ctx),
+    // Four coffees and a dessert somebody left before: a table, not a visit.
+    condition: (ctx: Ctx) => free(ctx) && romanceOf(ctx.state) === undefined && needs(['ex'])(ctx),
     resolve: (ctx: Ctx) => {
       const t = targetOfKind(ctx, ['ex']);
       if (!t) return noTarget();
@@ -706,7 +607,7 @@ const interactions: InteractionDef[] = [
           effects: [
             withPerson(t.id, (person) => {
               if (person.kind === 'ex') person.kind = 'partner';
-              person.rel = clamped(person.rel + 10);
+              person.rel = clampStat(person.rel + 10);
             }),
             { kind: 'stat', stat: 'happiness', delta: 8 },
           ],
@@ -840,15 +741,27 @@ const events: EventDef[] = [
     minAge: 18,
     maxAge: 110,
     weight: 4,
-    condition: (ctx: Ctx) => free(ctx) && firstOfKind(ctx.state, 'spouse') !== undefined,
+    /* Any romance, not only a marriage: the adult pack shipped a second
+       anniversary card at 18-64 with these exact three effects, so a married
+       character carried eight weight of it and an unmarried one four. That card
+       is gone, and its reach came here rather than being lost with it — which
+       is what makes this a deduplication and not a cut. */
+    condition: (ctx: Ctx) => free(ctx) && romanceOf(ctx.state) !== undefined,
     text: (ctx: Ctx) => {
+      const spouse = firstOfKind(ctx.state, 'spouse');
+      // A wedding age outlives the wedding, so the count needs a spouse today.
       const wedding = ctx.c.flags['rel:weddingAge'];
       const years =
-        typeof wedding === 'number' && Number.isFinite(wedding) ? ctx.c.age - wedding : 0;
+        spouse !== undefined && typeof wedding === 'number' && Number.isFinite(wedding)
+          ? ctx.c.age - wedding
+          : 0;
       if (years >= 1) {
         return `${years} year${years === 1 ? '' : 's'} married. {partner} remembered first.`;
       }
-      return 'Your anniversary came round. {partner} remembered first.';
+      if (spouse !== undefined) {
+        return 'Your anniversary came round. {partner} remembered first.';
+      }
+      return 'You and {partner} hit another year together. They remembered first.';
     },
     effects: [
       { kind: 'rel', who: 'partner', delta: 6 },
@@ -997,7 +910,14 @@ const events: EventDef[] = [
     maxAge: 110,
     weight: 3,
     condition: (ctx: Ctx) => free(ctx) && firstOfKind(ctx.state, 'spouse') !== undefined,
-    text: 'Your in-laws have opinions about your kitchen, your job and your haircut.',
+    /* Told two ways, because the adult pack shipped its own in-law card at
+       20-64 down to the sentence; its wording is the second variant here rather
+       than a second three-weight card in the same window. */
+    text: (ctx: Ctx) =>
+      ctx.rng.pick([
+        'Your in-laws have opinions about your kitchen, your job and your haircut.',
+        'Your mother-in-law has opinions about your home, your job and your cooking.',
+      ]),
     choices: [
       {
         label: 'Smile and nod',

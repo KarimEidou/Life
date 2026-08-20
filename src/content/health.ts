@@ -1,3 +1,4 @@
+import { addiction, free, holds, trueFlag } from '@/content/lib';
 import type {
   AddictionKey,
   Character,
@@ -51,41 +52,21 @@ import type {
  * the engine reads it both as `You came down with ${label}.` and as
  * `You died of ${label}.`
  *
- * The rows that need the world outside ask `free`: a church-hall clinic, a
- * pharmacy queue, a private scan, a dentist's chair and thirty days of
- * residential rehab. `eventsPhase` keeps drawing and the Health sheet stays
- * reachable while the character is inside, so an ungated row is one the prison
- * pack's years hand out from a cell. The bouts (`flu-season`, `insomnia`,
- * `allergies`, `back-tweak`) and the care rows (`act-doctor`, `act-therapy`,
- * `act-checkup`, `act-meditation`) deliberately do not ask: a cell is as good a
- * place as any to catch flu, fail to sleep or be seen by the infirmary.
+ * The rows that need the world outside ask `free`, under the prison policy
+ * documented above `free` in `@/content/lib`: a church-hall clinic, a pharmacy
+ * queue, a private scan, a dentist's chair and thirty days of residential
+ * rehab. `eventsPhase` keeps drawing and the Health sheet stays reachable while
+ * the character is inside, so an ungated row is one the prison pack's years hand
+ * out from a cell. The bouts (`flu-season`, `insomnia`, `allergies`,
+ * `back-tweak`) and the care rows (`act-doctor`, `act-therapy`, `act-checkup`,
+ * `act-meditation`) are the policy's first class and deliberately do not ask: a
+ * cell is as good a place as any to catch flu, fail to sleep or be seen by the
+ * infirmary, and the infirmary is what a prison provides.
  */
 
 /* ------------------------------------------------------------------ */
 /* Readers                                                             */
 /* ------------------------------------------------------------------ */
-
-/** Not behind bars. The prison pack owns those years. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
-
-/** Severity 0..100 of one addiction; anything unreadable counts as none. */
-function addiction(c: Character, which: AddictionKey): number {
-  const raw = c.addictions[which];
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return 0;
-  return raw > 100 ? 100 : raw;
-}
-
-/** Strict `=== true`: a truthy string or a 1 is not the marker a pack set. */
-function trueFlag(c: Character, key: string): boolean {
-  return c.flags[key] === true;
-}
-
-/** True while the character is carrying this condition, treated or not. */
-function holds(c: Character, defId: string): boolean {
-  return c.illnesses.some((illness) => illness.defId === defId);
-}
 
 /** Rows the character is carrying that nobody is treating yet. */
 function untreated(c: Character): Illness[] {
@@ -606,6 +587,9 @@ const interactions: InteractionDef[] = [
 /* Events                                                              */
 /* ------------------------------------------------------------------ */
 
+/** What the church hall counts as being able to pay for a doctor yourself. */
+const CLINIC_MEANS_TEST = 5000;
+
 const events: EventDef[] = [
   {
     id: 'ev-health-flu-season',
@@ -702,16 +686,22 @@ const events: EventDef[] = [
     minAge: 0,
     maxAge: 120,
     weight: 4,
-    condition: free,
+    /* A free clinic is for people who need one, and needs a door to walk
+       through, so it asks all three of `free`, something to treat and a means
+       test. Ungated at 0-120 it was the pack's largest leak: nothing in the
+       engine ever clears `Illness.treated`, and `deathProbability` charges a
+       treated row `lethality * 0.5` against an untreated `lethality * 2`, so a
+       single draw quartered the hazard of a chronic condition — permanently,
+       for nothing, to a character who could have paid `act-doctor` for it.
+       The `health +3` went with it: what this card is worth is the
+       prescription, and a well millionaire now queues for neither. */
+    condition: (ctx: Ctx) =>
+      free(ctx) && (untreated(ctx.c).length > 0 || ctx.c.money < CLINIC_MEANS_TEST),
     text: (ctx: Ctx) =>
       untreated(ctx.c).length > 0
         ? 'A free clinic set up in the church hall. You queued three hours and left with a prescription.'
         : 'A free clinic set up in the church hall. You got a shot, a lollipop and a clean bill of health.',
-    effects: [
-      treatFirstUntreated,
-      { kind: 'stat', stat: 'happiness', delta: 2 },
-      { kind: 'stat', stat: 'health', delta: 3 },
-    ],
+    effects: [treatFirstUntreated, { kind: 'stat', stat: 'happiness', delta: 2 }],
   },
   {
     id: 'ev-health-insomnia',
@@ -720,7 +710,15 @@ const events: EventDef[] = [
     minAge: 12,
     maxAge: 120,
     weight: 5,
-    text: 'You did not sleep properly for a week. The ceiling has 412 tiles.',
+    /* The adult pack shipped the same bad week at 18-64 on slightly harsher
+       numbers, which billed one bout twice for half a life. A body loses sleep
+       at any age and in any bed, so this is the copy that survived — ungated,
+       for the whole life — and the other telling folded in here. */
+    text: (ctx: Ctx) =>
+      `You did not sleep properly for a week. ${ctx.rng.pick([
+        'The ceiling has 412 tiles.',
+        'Everything got harder.',
+      ])}`,
     effects: [
       { kind: 'stat', stat: 'health', delta: -2 },
       { kind: 'stat', stat: 'happiness', delta: -3 },

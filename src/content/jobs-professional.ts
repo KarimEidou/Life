@@ -27,6 +27,14 @@ import type { ContentPack, JobDef } from '@/types';
  * *undergraduate* major and is set only on university enrolment. Medicine and law
  * therefore ask for the same majors their postgrad programme accepts — a doctor
  * still reads as a biology graduate years after med school.
+ *
+ * One rule shapes the salaries, and it falls out of the asymmetry above.
+ * `rollPromotion` floors a promotion at the salary already earned, but
+ * `applyForJob` writes `baseSalary` flat — and because every rung above the
+ * first names a `prevJobId`, the only character who can apply for it is the
+ * holder of the rung below. So a rung paying less than the one under it charges
+ * a pay cut for the climb the career sheet advertises: pay never falls up a
+ * ladder. `__tests__/jobs-ladders.test.ts` holds that across both job packs.
  */
 
 const jobs: JobDef[] = [
@@ -154,16 +162,17 @@ const jobs: JobDef[] = [
     promotesTo: 'job-judge',
   },
   {
-    /* The bench pays less than the firm on purpose, and `rollPromotion` never
-       cuts pay — a partner who takes the robe keeps the salary they built. The
-       minAge is a gate on applying cold; a lifer promoted onto the bench early
-       is the rare career the engine allows and the story is better for it. */
+    /* The top of the ladder, and the rung the salary rule above bites hardest
+       for: `prevJobId` means every cold applicant is a partner already earning
+       240k, and `applyForJob` writes this number straight over that. The minAge
+       gates that cold application; a lifer promoted onto the bench early is the
+       rare career the engine allows and the story is better for it. */
     id: 'job-judge',
     track: 'law',
     title: 'Judge',
     icon: '⚖️',
     level: 4,
-    baseSalary: 190000,
+    baseSalary: 260000,
     raisePct: 0.03,
     req: {
       minAge: 45,

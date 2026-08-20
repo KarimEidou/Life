@@ -231,13 +231,14 @@ describe('act-endorse', () => {
 /**
  * Activities pack: the rows a sentence takes away.
  *
- * The pack's rule is that the prison pack owns those years, and it names the
- * handful that survive one — a book, the yard, the prison library. Every other
- * row has to ask `free`, because nothing else asks for it: `canUse` and
- * `availableInteractions` consult `condition` and never `c.prison`, and the
- * Activities tab stays on the bar for the whole sentence. A row that forgets is
- * playable from a cell — free, uncooled and unlimited — beside a prison pack
- * that puts its own mood rows on a yearly cooldown for exactly that reason.
+ * The pack's rule is the first class of the prison policy documented above
+ * `free` in `@/content/lib`, and it names the two rows that survive a sentence
+ * — a library and a book. Every other row has to ask `free`, because nothing
+ * else asks for it: `canUse` and `availableInteractions` consult `condition` and
+ * never `c.prison`, and the Activities tab stays on the bar for the whole
+ * sentence. A row that forgets is playable from a cell — free, uncooled and
+ * unlimited — beside a prison pack that puts its own mood rows on a yearly
+ * cooldown for exactly that reason.
  */
 
 const activityRows: InteractionDef[] = activitiesPack.interactions ?? [];
@@ -245,11 +246,15 @@ const activityRows: InteractionDef[] = activitiesPack.interactions ?? [];
 /** Every area the pack ships, so a new one cannot slip past this contract. */
 const ACTIVITY_AREAS = [...new Set(activityRows.map((row) => row.area))];
 
-/** The three the pack documents as surviving a sentence. */
-const PRISON_SAFE = ['act-gym', 'act-library', 'act-read-book'];
+/** The two the pack documents as surviving a sentence. */
+const PRISON_SAFE = ['act-library', 'act-read-book'];
 
-/** Reads as a bug from a cell: a console, a games night, a retreat. */
-const OUTSIDE_ONLY = ['act-board-games', 'act-meditate', 'act-video-games'];
+/**
+ * Reads as a bug from a cell: a console, a games night, a retreat — and a $40
+ * gym membership, which the yard (`act-prison-workout`) is the inside version
+ * of and which `ev-health-gym-injury` already treats as an outside habit.
+ */
+const OUTSIDE_ONLY = ['act-board-games', 'act-gym', 'act-meditate', 'act-video-games'];
 
 function activitiesRegistry(): ContentRegistry {
   return buildRegistry([{ id: 'activities-under-test', interactions: activityRows }]);

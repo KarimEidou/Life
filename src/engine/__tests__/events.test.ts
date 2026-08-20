@@ -120,6 +120,32 @@ describe('eventsPhase eligibility', () => {
     expect(entries).toEqual([]);
   });
 
+  it('keeps out every weight rng.weighted refuses, and only those', () => {
+    /* The pool gate and the draw share one predicate, so the set of weights that
+       leave the year event-free must be exactly the set `weighted` throws on. */
+    const unrollable = [0, -3, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    for (const weight of unrollable) {
+      const state = newLife(25);
+      const reg = registryOf([event({ id: 'unrollable', weight })]);
+      const before = state.rngState;
+
+      let entries: LogEntry[] = [{ icon: '!', kind: 'info', text: 'unset' }];
+      expect(() => {
+        entries = eventsPhase(ctxOf(state, reg, liveWeightedRng(state, [true, true])));
+      }, `weight ${weight}`).not.toThrow();
+      expect(entries, `weight ${weight}`).toEqual([]);
+      // Empty pool, so the phase returns before the 85% roll.
+      expect(state.rngState, `weight ${weight}`).toBe(before);
+    }
+
+    // The smallest weight the predicate does accept still fires.
+    const state = newLife(25);
+    const reg = registryOf([event({ id: 'faint', weight: 1e-9, text: 'Faint.' })]);
+    const entries = eventsPhase(ctxOf(state, reg, liveWeightedRng(state, [true, false])));
+
+    expect(entries.map((e) => e.text)).toEqual(['Faint.']);
+  });
+
   it('spends no randomness on a year whose only event has a non-finite weight', () => {
     // The empty-pool early return, which is what keeps the year draw-free.
     const state = newLife(23);

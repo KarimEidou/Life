@@ -9,6 +9,7 @@
  * than one that fails loudly, so the flag readers below are strict about types.
  */
 
+import { netWorth } from '@/engine/wealth';
 import type { AchievementDef, Character, ContentPack, GameState, Person, RelKind } from '@/types';
 
 /** Flags are free-form JSON; only a genuine finite number counts as one. */
@@ -25,20 +26,6 @@ function trueFlag(c: Character, key: string): boolean {
 function strFlag(c: Character, key: string): string {
   const raw = c.flags[key];
   return typeof raw === 'string' ? raw : '';
-}
-
-/**
- * Cash + investments + asset values - loan principal, inlined here because a
- * check may not import the finance phase.
- */
-function netWorth(state: GameState): number {
-  const c = state.character;
-  const inv = c.investments;
-  const invested = inv.savings + inv.index + inv.crypto;
-  const owned = c.assets.reduce((sum, asset) => sum + asset.value, 0);
-  const owed = c.loans.reduce((sum, loan) => sum + loan.principal, 0);
-  const total = c.money + invested + owned - owed;
-  return Number.isFinite(total) ? total : 0;
 }
 
 function countPeople(state: GameState, match: (p: Person) => boolean): number {
@@ -68,6 +55,10 @@ function countAssets(state: GameState, prefix: string): number {
  * moved. A legacy heir's log opens with a different sentence, which is why the
  * line is required to be a birth line — the check goes quiet rather than
  * guessing.
+ *
+ * The country slot is matched whole, as `emigration.ts::abroad` matches it:
+ * `includes` would read a character surnamed `France` who moved to France as
+ * still living where she was born, and lock her out of the achievement for good.
  */
 function movedCountry(state: GameState): boolean {
   const c = state.character;
@@ -77,7 +68,7 @@ function movedCountry(state: GameState): boolean {
   if (label === '') return false;
   const opening = state.log[0]?.entries[0]?.text ?? '';
   if (!opening.startsWith('You were born')) return false;
-  return !opening.includes(label);
+  return !opening.endsWith(` in ${label}.`);
 }
 
 /**

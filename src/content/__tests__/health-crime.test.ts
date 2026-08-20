@@ -14,6 +14,7 @@ import type {
   Ctx,
   EventDef,
   GameState,
+  Illness,
   IllnessDef,
   Person,
   PrisonState,
@@ -237,6 +238,83 @@ describe('health pack prison gate', () => {
     for (const id of INSIDE_EVENTS) {
       expect(healthEventOf(id).condition?.(ctxOf(inside, HEALTH)) !== false, id).toBe(true);
     }
+  });
+});
+
+/**
+ * Health pack: the free clinic's means test.
+ *
+ * `treatFirstUntreated` is permanent — nothing in the engine ever clears
+ * `Illness.treated` — and `deathProbability` charges a treated row
+ * `lethality * 0.5` against an untreated `lethality * 2`. Ungated at 0-120 on
+ * weight 4 the card therefore handed most lives a fourfold cut to the hazard of
+ * whatever it touched, plus 3 free health, no matter what they could have paid
+ * `act-doctor` for the same work. It now needs something to treat or somebody
+ * who cannot buy the treatment, and the health is gone.
+ */
+
+/** Comfortably above the pack's means test: this character can pay a doctor. */
+const CLINIC_RICH = 50000;
+
+/** Just under it. Tracks the constant in `health.ts`; move both together. */
+const CLINIC_BROKE = 4999;
+
+/** Untreated flu: the cheapest thing a clinic can find on the pile. */
+const FLU: Illness = { defId: 'ill-flu', years: 1, treated: false };
+
+/** Well, outside and able to pay: the character the clinic used to reward. */
+function wellAndRich(): GameState {
+  const state = patient(null);
+  state.character.money = CLINIC_RICH;
+  return state;
+}
+
+describe('ev-health-free-clinic', () => {
+  const clinic = healthEventOf('ev-health-free-clinic');
+
+  it('turns away a well character who can afford a doctor', () => {
+    expect(clinic.condition?.(ctxOf(wellAndRich(), HEALTH))).toBe(false);
+  });
+
+  it('opens for the same character the moment something goes untreated', () => {
+    const state = wellAndRich();
+    state.character.illnesses = [{ ...FLU }];
+
+    expect(clinic.condition?.(ctxOf(state, HEALTH))).toBe(true);
+
+    // Not vacuous: a row already under treatment is not something to treat.
+    state.character.illnesses = [{ ...FLU, treated: true }];
+    expect(clinic.condition?.(ctxOf(state, HEALTH))).toBe(false);
+  });
+
+  it('opens for a well character who has no money either way', () => {
+    const state = wellAndRich();
+    state.character.money = CLINIC_BROKE;
+
+    expect(clinic.condition?.(ctxOf(state, HEALTH))).toBe(true);
+  });
+
+  it('stays shut for a sentence whatever the chart and the balance say', () => {
+    const state = patient(SENTENCE);
+    state.character.money = CLINIC_BROKE;
+    state.character.illnesses = [{ ...FLU }];
+
+    expect(clinic.condition?.(ctxOf(state, HEALTH))).toBe(false);
+  });
+
+  it('hands over the prescription and no free health', () => {
+    const reg = buildRegistry([{ id: 'health-clinic-only', events: [clinic] }]);
+    const state = wellAndRich();
+    state.character.illnesses = [{ ...FLU }];
+    state.character.stats.health = 60;
+    state.character.stats.happiness = 50;
+
+    eventsPhase(ctxOf(state, reg, alwaysDraws()));
+
+    expect(state.character.illnesses).toEqual([{ ...FLU, treated: true }]);
+    expect(state.character.stats.happiness).toBe(52);
+    // The treatment is the whole card now; the +3 it used to add is gone.
+    expect(state.character.stats.health).toBe(60);
   });
 });
 

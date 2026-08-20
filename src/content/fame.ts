@@ -1,4 +1,4 @@
-import { fmtMoney } from '@/engine/format';
+import { fmtMoney, free } from '@/content/lib';
 import type {
   Character,
   ContentPack,
@@ -41,12 +41,8 @@ function statOf(raw: number): number {
   return raw > 100 ? 100 : raw;
 }
 
-/** Out in the world, where an audience can actually reach you. */
-function free(ctx: Ctx): boolean {
-  return ctx.c.prison === null;
-}
-
-/** Famous enough for this row, and out where it matters. */
+/** Famous enough for this row, and out where it matters (`free`: an audience
+ *  cannot reach you in a cell). */
 function famous(min: number): (ctx: Ctx) => boolean {
   return (ctx) => free(ctx) && fameOf(ctx.c) >= min;
 }

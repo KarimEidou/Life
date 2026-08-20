@@ -84,13 +84,15 @@ function SheetHost(): ReactElement {
 
   return (
     <AnimatePresence>
-      {sheets.map((entry, index) => {
+      {sheets.map((entry) => {
         const Body = SHEETS[entry.id];
         return (
-          /* Sheets are a stack: the same id can legitimately appear twice, so
-             the position is part of the key. */
+          /* The entry's own key, never its position: the same id can appear
+             twice (two `person` sheets), and an entry removed from under
+             another must leave the ones above it mounted, with their state and
+             without a second enter animation. */
           <Sheet
-            key={`${entry.id}-${String(index)}`}
+            key={entry.key}
             open
             onClose={popSheet}
             dismissible={entry.id !== 'event'}

@@ -1,14 +1,24 @@
 {
-  // Second program for the code outside `src`, which `tsconfig.json` does not
-  // include. Playwright compiles `e2e/` with esbuild, which strips types
-  // without checking them, so nothing else typechecks these files.
-  // `scripts/*.mjs` and the root `*.config.ts` files import node builtins and
-  // read `process`; they can only join this program once @types/node is a
-  // devDependency.
+  // Second program, for the code outside `src` that `tsconfig.json` does not
+  // include: the root config files and all of `e2e`. Nothing else typechecks
+  // them — Vite and Playwright both compile with esbuild, which strips types
+  // without checking them — so a broken `e2e/helpers.ts` signature or a
+  // misspelled Vite option is otherwise found only at run time, if ever.
+  //
+  // `*.ts` matches one path segment, so it covers every root-level config plus
+  // `tools.d.ts` and nothing deeper: a config file added at the root joins this
+  // program automatically instead of being silently unchecked.
+  //
+  // `scripts/*.mjs` stays out on purpose — typechecking JavaScript needs
+  // `allowJs`/`checkJs`, and `gen-icons.mjs` does bit-twiddling that `checkJs`
+  // would want annotated. That is a separate, budgeted decision.
+  //
+  // `types: []` drops the root program's `vite/client`, which is browser-only
+  // and wrong here. Node's globals come from `tools.d.ts` instead; see there.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
     "types": []
   },
-  "include": ["e2e"]
+  "include": ["e2e", "*.ts"]
 }

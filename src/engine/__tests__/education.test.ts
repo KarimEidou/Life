@@ -10,9 +10,10 @@ import type {
   YearLog,
 } from '@/types';
 
-/* Mocked so these tests never load the whole phase chain `ageUp` imports; the
-   stand-in mirrors its contract (last year log, created for this age when empty). */
-vi.mock('@/engine/ageUp', () => ({
+/* Mocked so these tests pin the logging contract rather than the log module's
+   implementation; the stand-in mirrors it (last year log, created for this age
+   when empty). */
+vi.mock('@/engine/log', () => ({
   currentYearLog: (state: GameState): YearLog => {
     const last = state.log[state.log.length - 1];
     if (last) return last;

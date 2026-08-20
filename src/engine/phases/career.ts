@@ -7,9 +7,11 @@
  * longer lists the position.
  */
 
-import { currentYearLog } from '@/engine/ageUp';
 import { clampMoney, clampStat } from '@/engine/effects';
+import { currentYearLog } from '@/engine/log';
+import { findById } from '@/engine/registry';
 import { createRng } from '@/engine/rng';
+import { LEVEL_ORDER } from '@/engine/rules';
 import { LIFE_OVER, lifeIsOver } from '@/engine/state';
 import type {
   ContentRegistry,
@@ -19,16 +21,6 @@ import type {
   JobDef,
   LogEntry,
 } from '@/types';
-
-/** Ranking used for "at least this much schooling" checks. */
-const LEVEL_ORDER: Record<EdLevel, number> = {
-  none: 0,
-  primary: 1,
-  middle: 2,
-  high: 3,
-  university: 4,
-  postgrad: 5,
-};
 
 const LEVEL_LABEL: Record<EdLevel, string> = {
   none: 'no schooling',
@@ -85,11 +77,8 @@ const RAISE_CHANCE = 0.4;
 const RAISE_SIZE = 1.08;
 const RAISE_SNUB = 3;
 
-/* Registry maps are typed as total records, so widen before lookup: a hand-built
-   or partially loaded registry can still miss the id we ask for. */
 function findJob(reg: ContentRegistry, id: string): JobDef | undefined {
-  const byId: Record<string, JobDef | undefined> = reg.jobsById;
-  return byId[id] ?? reg.jobs.find((job) => job.id === id);
+  return findById(reg.jobsById, reg.jobs, id);
 }
 
 /** Reads a counter flag that older saves or content may have left unset. */

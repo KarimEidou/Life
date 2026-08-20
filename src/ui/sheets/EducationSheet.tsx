@@ -112,7 +112,10 @@ export function EducationSheet(): ReactElement | null {
                 testId="edu-dropout"
                 fullWidth
                 onClick={() => {
-                  useGameStore.getState().dropOut();
+                  const r = useGameStore.getState().dropOut();
+                  if (!r.ok) {
+                    useUiStore.getState().addToast({ icon: '🚫', title: r.reason });
+                  }
                 }}
               >
                 Drop out
