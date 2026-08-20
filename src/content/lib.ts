@@ -149,6 +149,13 @@ export const MILESTONE_ONE_YEAR = MILESTONE * 2;
  * content itself — the lowest `minAge` in `reg.crimes`, and of any event whose
  * effects carry a `{kind:'jail'}` — and holds only the cards whose window still
  * covers it. Lower a crime's age and the rule reaches further on its own.
+ *
+ * The cards it does hold, it holds at every age inside their own windows, which
+ * is the other half of the same thought: asked at one fixed year, a card that
+ * never mentions prison still answers "no" whenever something else about that
+ * year happens to disqualify it, and an ungated senior card asked at thirty
+ * answers "no" for its `minAge`. Held across the window, the year the card
+ * opens is a year it can be dealt from a cell.
  */
 
 /** Not behind bars. Asked by everything in class 2, directly or via `inSchool`. */
