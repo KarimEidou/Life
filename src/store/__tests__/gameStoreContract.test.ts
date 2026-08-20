@@ -18,7 +18,7 @@
  * left untouched. It is not repeated here.
  */
 
-import { beforeEach, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { getRegistry } from '@/content';
 import { killCharacter } from '@/engine/death';
@@ -140,13 +140,16 @@ interface CommitCase {
 }
 
 /**
- * Every action that must end in `commit`, refusal or not.
+ * Every action that must end in `commit`, and the setup each one needs to reach
+ * it.
  *
- * A refused call belongs here as much as an accepted one: `withLife` commits
- * either way on purpose — nothing about a refusal argues for leaving the life
- * unflushed — and the actions with hand-written bodies are given the setup that
- * takes them down their accepted path, because that is where their `commit` is
- * spelled out one branch at a time.
+ * For the actions written through `withLife` a refused call belongs here as much
+ * as an accepted one: it commits either way on purpose, because nothing about a
+ * refusal argues for leaving the life unflushed. The ones with hand-written
+ * bodies get the setup that takes them down their accepted path instead, since
+ * their `commit` is spelled out one branch at a time — and `startBlackjack` is
+ * the one action whose refusal must *not* commit, a refused deal having moved
+ * nothing at all.
  */
 const COMMITTING: CommitCase[] = [
   { name: 'newLife', run: (s) => s.newLife({ slot: 1, seed: 5 }) },
@@ -189,15 +192,17 @@ const NON_COMMITTING: Record<string, string> = {
 
 /** Every callable the facade exposes, as the store itself reports them. */
 function facadeActions(): string[] {
-  const state: Record<string, unknown> = useGameStore.getState();
+  const state = useGameStore.getState();
   return Object.keys(state)
-    .filter((key) => typeof state[key] === 'function')
+    .filter((key) => typeof state[key as keyof Store] === 'function')
     .sort();
 }
 
-it('accounts for every action the facade exposes', () => {
-  const named = [...COMMITTING.map((c) => c.name), ...Object.keys(NON_COMMITTING)].sort();
-  expect(named).toEqual(facadeActions());
+describe('the facade action surface', () => {
+  it('is accounted for, action by action, by the two lists above', () => {
+    const named = [...COMMITTING.map((c) => c.name), ...Object.keys(NON_COMMITTING)].sort();
+    expect(named).toEqual(facadeActions());
+  });
 });
 
 /** The three things a commit leaves behind, checked against the life it left. */
@@ -226,16 +231,18 @@ function expectCommitted(before: GameState, unlockedBefore: readonly string[]): 
   }
 }
 
-for (const action of COMMITTING) {
-  it(`${action.name} commits the life it just changed`, () => {
-    setUpFullLife();
-    action.prepare?.();
-    const before = game();
-    const unlockedBefore = useGameStore.getState().unlocked;
-    expect(unlockedBefore).toContain(CARRIED);
+describe('every mutating action commits the life it just changed', () => {
+  for (const action of COMMITTING) {
+    it(action.name, () => {
+      setUpFullLife();
+      action.prepare?.();
+      const before = game();
+      const unlockedBefore = useGameStore.getState().unlocked;
+      expect(unlockedBefore).toContain(CARRIED);
 
-    action.run(useGameStore.getState());
+      action.run(useGameStore.getState());
 
-    expectCommitted(before, unlockedBefore);
-  });
-}
+      expectCommitted(before, unlockedBefore);
+    });
+  }
+});
